@@ -1,8 +1,8 @@
 # AUTOBLOGGER AI Backend — Cloudflare Workers Dashboard-এর মাধ্যমে ডিপ্লয়মেন্ট গাইড (বাংলায়)
 
-এই গাইডে দেখানো হয়েছে কীভাবে **Cloud Run (যাতে Billing লাগে)** বাদ দিয়ে **Cloudflare Workers + D1 + Queues + Cron Triggers + GitHub** ব্যবহার করে সম্পূর্ণ ফ্রি/কম খরচে **AUTOBLOGGER AI** ব্যাকএন্ড ডিপ্লয় করবেন এবং আপনার **Android অ্যাপের Setup Wizard**-এ সংযুক্ত করবেন।
+এই গাইডে দেখানো হয়েছে কীভাবে **Cloud Run (যাতে Billing লাগে)** এবং **Paid Cloudflare Queues/R2** বাদ দিয়ে **সম্পূর্ণ Cloudflare Free Plan (Workers + D1 + Cron Triggers)** ব্যবহার করে কোনো ক্রেডিট কার্ড বা পেইড প্ল্যান ছাড়াই **AUTOBLOGGER AI** ব্যাকএন্ড ডিপ্লয় করবেন এবং আপনার **Android অ্যাপের Setup Wizard**-এ সংযুক্ত করবেন।
 
-> **গুরুত্বপূর্ণ:** শুধু GitHub রিপোজিটরি সংযুক্ত করলে Cloudflare নিজে থেকে D1 ডাটাবেস, Queues বা R2 Bucket তৈরি করে না। তাই নিচের ধাপ অনুযায়ী আগে Dashboard থেকে D1 ও Queues তৈরি করে নেবেন।
+> **গুরুত্বপূর্ণ:** আপনার শুধু একটি **Cloudflare D1 Database (`autoblogger-db`)** লাগবে। কোনো Paid Queues বা R2 Bucket প্রয়োজন নেই।
 
 ---
 
@@ -13,31 +13,25 @@
 3. **Create Database** বাটনে ক্লিক করুন:
    - **Name:** `autoblogger-db`
    - **Location:** আপনার নিকটবর্তী অঞ্চল (যেমন Asia-Pacific / Automatic) সিলেক্ট করে **Create** চাপুন।
-4. তৈরি হওয়ার পর ড্যাশবোর্ড থেকে আপনার **Database ID** (UUID ফরম্যাট, যেমন `a1b2c3d4-...`) কপি করে রাখুন।
-5. আপনার GitHub রিপোজিটরির `backend/wrangler.jsonc` ফাইলে `d1_databases[0].database_id`-এর জায়গায় `00000000-0000-0000-0000-000000000000` বদলে আসল **Database ID** বসান।
+4. তৈরি হওয়ার পর ড্যাশবোর্ড থেকে আপনার **Database ID** (UUID ফরম্যাট) কপি করে `backend/wrangler.jsonc`-এর `d1_databases[0].database_id`-তে বসান।
 
 ---
 
 ## ধাপ ২: D1 ডাটাবেসে টেবিল তৈরি (Migrations চালানো)
 
-1. টার্মিনাল বা GitHub Actions থেকে চালাতে চাইলে:
+1. GitHub Actions স্বয়ংক্রিয়ভাবে নিচের কমান্ডটি চালিয়ে মাইগ্রেশন প্রয়োগ করে:
    ```bash
-   npx wrangler d1 migrations apply DB --remote
+   npx wrangler d1 migrations apply autoblogger-db --remote
    ```
-2. অথবা Cloudflare Dashboard-এ **autoblogger-db > Console** ট্যাব থেকে ম্যানুয়ালি করতে চাইলে:
-   - প্রথমে `backend/migrations/0001_initial_schema.sql` ফাইলের পুরো SQL পেস্ট করে **Execute** চাপুন।
-   - এরপর `backend/migrations/0002_settings_and_ratelimits.sql` ফাইলের SQL পেস্ট করে **Execute** চাপুন।
-   এতে `agent_state`, `ai_provider_health`, `campaigns`, `pipeline_runs`, `posts`, `task_queue`, `ad_configs`, `analytics_snapshots`, `device_tokens`, `notifications`, `oauth_tokens`, `system_logs`, `app_settings`, এবং `rate_limits` টেবিল তৈরি হয়ে যাবে।
+2. এতে `0001_initial_schema.sql`, `0002_settings_and_ratelimits.sql`, এবং `0003_d1_job_queue_and_media.sql` প্রয়োগ হয়ে D1 জব কিউ, লকিং, মিডিয়া ব্যাকআপ এবং সব টেবিল তৈরি হয়ে যাবে।
 
 ---
 
-## ধাপ ৩: Cloudflare Queues এবং R2 Storage তৈরি (ব্যাচ জবের জন্য)
+## ধাপ ৩: Free Plan জব কিউ ও মিডিয়া স্টোরেজ (অতিরিক্ত কোনো সার্ভিস লাগবে না)
 
-1. বাম মেনু থেকে **Storage & Databases > Queues**-এ যান > **Create Queue** চাপুন:
-   - প্রথম Queue-এর নাম দিন: `autoblogger-tasks`
-   - দ্বিতীয় Dead-letter Queue-এর নাম দিন: `autoblogger-tasks-dlq`
-   *(দ্রষ্টব্য: আপনার Cloudflare অ্যাকাউন্টে যদি Queues চালু না থাকে, তবে `wrangler.jsonc`-এর `queues` অংশটি বাদ দিলেও ব্যাকএন্ড D1 + Cron Triggers-এর মাধ্যমে কাজ করবে।)*
-2. *(ঐচ্ছিক)* ইমেজ ও আর্টিকেল HTML ব্যাকআপের জন্য **Storage & Databases > R2 Object Storage**-এ গিয়ে `autoblogger-media` নামে একটি Bucket তৈরি করুন।
+- Paid **Cloudflare Queues** (`TASK_QUEUE`) এবং **R2** (`MEDIA_BUCKET`) সম্পূর্ণ বাদ দেওয়া হয়েছে।
+- এখন সব ব্যাকগ্রাউন্ড জব **D1 `task_queue` টেবিলে** সেভ হয় এবং **Cloudflare Cron Triggers** প্রতিবার সর্বোচ্চ ৩টি পেন্ডিং জব নিরাপদ লকিং ও এক্সপোনেনশিয়াল ব্যাকঅফ সহ প্রসেস করে।
+- মিডিয়া ও HTML আর্কাইভ ব্যাকআপ সরাসরি D1-এর `media_assets` টেবিলে সংরক্ষিত হয়।
 
 ---
 
@@ -54,7 +48,7 @@
 5. **Save and Deploy** চাপুন।
 
 ### পদ্ধতি খ: GitHub Actions (`.github/workflows/cloudflare-deploy.yml`) দিয়ে
-1. Cloudflare Dashboard-এ **My Profile > API Tokens > Create Token** থেকে **Edit Cloudflare Workers** টেমপ্লেট ব্যবহার করে একটি টোকেন তৈরি করুন (সাথে **D1: Edit** ও **Queues: Edit** পারমিশন দিন)।
+1. Cloudflare Dashboard-এ **My Profile > API Tokens > Create Token** থেকে **Edit Cloudflare Workers** টেমপ্লেট ব্যবহার করে একটি টোকেন তৈরি করুন (সাথে **D1: Edit** এবং **Account Settings: Read** পারমিশন দিন; আর কোনো Paid Queue/R2 পারমিশন লাগবে না)।
 2. ড্যাশবোর্ডের ডানদিক থেকে আপনার **Account ID** কপি করুন।
 3. আপনার GitHub রিপোজিটরির **Settings > Secrets and variables > Actions**-এ গিয়ে দুটি Secret যোগ করুন:
    - `CLOUDFLARE_API_TOKEN`

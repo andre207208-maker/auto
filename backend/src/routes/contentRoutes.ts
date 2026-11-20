@@ -69,7 +69,7 @@ contentRoutes.post('/research', async (c) => {
   return c.json({ research });
 });
 
-// Enqueues article generation asynchronously via Cloudflare Queues to respect Free plan CPU/wall limits
+// Enqueues article generation asynchronously via D1 persistent job queue to respect Free plan CPU/wall limits
 contentRoutes.post('/generate', async (c) => {
   const input = generateArticleSchema.parse(await c.req.json());
   const queued = await enqueueTask(c.env, {
@@ -80,7 +80,7 @@ contentRoutes.post('/generate', async (c) => {
   return c.json({ queued: true, task: queued.task }, 202);
 });
 
-// Always executes asynchronously as a 3-stage Queue pipeline (Research -> Generate -> SEO/Ads/Blogger)
+// Always executes asynchronously as a 3-stage D1 job pipeline (Research -> Generate -> SEO/Ads/Blogger)
 contentRoutes.post('/publish-pipeline', async (c) => {
   const input = pipelineSchema.parse(await c.req.json());
   const started = await startAutonomousPipeline(c.env, {

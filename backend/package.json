@@ -1,7 +1,7 @@
 {
   "name": "autoblogger-ai-backend",
   "version": "2.0.0",
-  "description": "Cloudflare Workers + D1 + Queues + Cron Triggers + R2 backend for AUTOBLOGGER AI",
+  "description": "Cloudflare Workers Free-plan backend (Workers + D1 + Cron Triggers + D1 Job Queue & Media) for AUTOBLOGGER AI",
   "private": true,
   "type": "module",
   "scripts": {

@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import workerEntry from '../src/index.js';
-import { QueueTaskMessage, WorkerEnv } from '../src/types/index.js';
+import { WorkerEnv } from '../src/types/index.js';
 
 /**
- * In-memory D1 mock supporting all 14 tables & prepared statements
- * needed to test Worker HTTP routes, Queues, Cron handlers, multi-key AI failover,
- * SEO quality gates, Adsterra injection, rate limiting, and analytics insights locally.
+ * In-memory D1 mock supporting all 15 tables & prepared statements
+ * needed to test Worker HTTP routes, D1 persistent job queue + locking, Cron Triggers,
+ * multi-key AI failover, SEO quality gates, Adsterra injection, D1 media storage, and analytics locally.
  */
-function createMockD1(): D1Database {
+function createMockD1(): { db: D1Database; tasks: Map<string, Record<string, unknown>> } {
   const agentState: {
     id: string;
     status: string;
@@ -34,6 +34,7 @@ function createMockD1(): D1Database {
   const rateLimits = new Map<string, { request_count: number; reset_at: number }>();
   const oauthTokens = new Map<string, Record<string, unknown>>();
   const analyticsSnapshots = new Map<string, Record<string, unknown>>();
+  const mediaAssets = new Map<string, Record<string, unknown>>();
   const systemLogs: Array<Record<string, unknown>> = [];
   const notifications: Array<Record<string, unknown>> = [];
 
@@ -95,15 +96,56 @@ function createMockD1(): D1Database {
         const row = oauthTokens.get(args[0] as string);
         return row ? ({ ...row } as T) : null;
       }
+      if (normalized.includes('FROM media_assets WHERE key =')) {
+        const row = mediaAssets.get(args[0] as string);
+        return row ? ({ ...row } as T) : null;
+      }
       return null;
     };
 
     const execAll = async <T>(): Promise<D1Result<T>> => {
       let results: unknown[] = [];
-      if (normalized.includes('FROM ai_provider_health')) {
-        results = Array.from(providerHealth.values());
+      if (normalized.includes('SELECT status, COUNT(*) AS cnt FROM task_queue GROUP BY status')) {
+        const grouped = new Map<string, number>();
+        for (const t of tasks.values()) {
+          const st = String(t.status);
+          grouped.set(st, (grouped.get(st) ?? 0) + 1);
+        }
+        results = Array.from(grouped.entries()).map(([status, cnt]) => ({ status, cnt }));
+      } else if (
+        normalized.includes(
+          "FROM task_queue WHERE status IN ('queued', 'retrying') AND (next_retry_at IS NULL OR next_retry_at <= ?)"
+        )
+      ) {
+        const nowIso = args[0] as string;
+        const limit = Number(args[1] ?? 3);
+        results = Array.from(tasks.values())
+          .filter(
+            (t) =>
+              (t.status === 'queued' || t.status === 'retrying') &&
+              (t.next_retry_at === null || String(t.next_retry_at) <= nowIso)
+          )
+          .sort(
+            (a, b) =>
+              Number(a.priority ?? 5) - Number(b.priority ?? 5) ||
+              String(a.created_at).localeCompare(String(b.created_at))
+          )
+          .slice(0, limit);
+      } else if (normalized.includes("FROM task_queue WHERE status IN ('queued', 'retrying')")) {
+        const limit = Number(args[0] ?? 50);
+        results = Array.from(tasks.values())
+          .filter((t) => t.status === 'queued' || t.status === 'retrying')
+          .slice(0, limit);
+      } else if (normalized.includes('FROM task_queue WHERE status =')) {
+        const st = args[0] as string;
+        const limit = Number(args[1] ?? 50);
+        results = Array.from(tasks.values())
+          .filter((t) => t.status === st)
+          .slice(0, limit);
       } else if (normalized.includes('FROM task_queue')) {
         results = Array.from(tasks.values());
+      } else if (normalized.includes('FROM ai_provider_health')) {
+        results = Array.from(providerHealth.values());
       } else if (normalized.includes('FROM campaigns')) {
         results = Array.from(campaigns.values());
       } else if (normalized.includes('FROM ad_configs')) {
@@ -189,24 +231,37 @@ function createMockD1(): D1Database {
           type: args[2],
           payload_json: args[3],
           status: args[4],
-          attempts: args[5],
-          max_attempts: args[6],
-          next_retry_at: args[7],
-          last_error: args[8],
-          result_json: args[9],
-          created_by: args[10],
-          created_at: args[11],
-          updated_at: args[12],
-          completed_at: args[13],
+          priority: args[5],
+          attempts: args[6],
+          max_attempts: args[7],
+          next_retry_at: args[8],
+          last_error: args[9],
+          result_json: args[10],
+          created_by: args[11],
+          created_at: args[12],
+          updated_at: args[13],
+          completed_at: args[14],
+          locked_at: null,
+          locked_by: null,
+          lock_expires_at: null,
+          started_at: null,
         });
         changes = 1;
       } else if (normalized.startsWith("UPDATE task_queue SET status = 'processing'")) {
-        const updatedAt = args[0] as string;
-        const id = args[1] as string;
+        const now = args[0] as string;
+        const workerId = args[1] as string;
+        const lockExpiresAt = args[2] as string;
+        const startedAt = args[3] as string;
+        const updatedAt = args[4] as string;
+        const id = args[5] as string;
         const row = tasks.get(id);
         if (row && (row.status === 'queued' || row.status === 'retrying')) {
           row.status = 'processing';
           row.attempts = Number(row.attempts) + 1;
+          row.locked_at = now;
+          row.locked_by = workerId;
+          row.lock_expires_at = lockExpiresAt;
+          row.started_at = row.started_at ?? startedAt;
           row.updated_at = updatedAt;
           changes = 1;
         }
@@ -217,7 +272,84 @@ function createMockD1(): D1Database {
           row.result_json = args[0];
           row.last_error = null;
           row.next_retry_at = null;
+          row.locked_at = null;
+          row.locked_by = null;
+          row.lock_expires_at = null;
           row.completed_at = args[1];
+          row.updated_at = args[2];
+          changes = 1;
+        }
+      } else if (
+        normalized.includes("SET status = 'dead_letter'") &&
+        normalized.includes('AND lock_expires_at <= ?')
+      ) {
+        const nowIso = args[0] as string;
+        for (const row of tasks.values()) {
+          if (
+            row.status === 'processing' &&
+            row.lock_expires_at !== null &&
+            String(row.lock_expires_at) <= nowIso &&
+            Number(row.attempts) >= Number(row.max_attempts)
+          ) {
+            row.status = 'dead_letter';
+            row.last_error = row.last_error || 'Worker execution lock expired after max attempts';
+            row.locked_at = null;
+            row.locked_by = null;
+            row.lock_expires_at = null;
+            row.next_retry_at = null;
+            row.updated_at = nowIso;
+            changes += 1;
+          }
+        }
+      } else if (
+        normalized.includes("SET status = 'retrying'") &&
+        normalized.includes('AND lock_expires_at <= ?')
+      ) {
+        const nowIso = args[0] as string;
+        for (const row of tasks.values()) {
+          if (
+            row.status === 'processing' &&
+            row.lock_expires_at !== null &&
+            String(row.lock_expires_at) <= nowIso &&
+            Number(row.attempts) < Number(row.max_attempts)
+          ) {
+            row.status = 'retrying';
+            row.last_error = 'Recovered expired D1 worker lock; scheduled for retry';
+            row.locked_at = null;
+            row.locked_by = null;
+            row.lock_expires_at = null;
+            row.next_retry_at = nowIso;
+            row.updated_at = nowIso;
+            changes += 1;
+          }
+        }
+      } else if (
+        normalized.startsWith("UPDATE task_queue SET status = 'dead_letter'") &&
+        normalized.includes('WHERE id = ?')
+      ) {
+        const row = tasks.get(args[2] as string);
+        if (row) {
+          row.status = 'dead_letter';
+          row.last_error = args[0];
+          row.next_retry_at = null;
+          row.locked_at = null;
+          row.locked_by = null;
+          row.lock_expires_at = null;
+          row.updated_at = args[1];
+          changes = 1;
+        }
+      } else if (
+        normalized.startsWith("UPDATE task_queue SET status = 'retrying'") &&
+        normalized.includes('WHERE id = ?')
+      ) {
+        const row = tasks.get(args[3] as string);
+        if (row) {
+          row.status = 'retrying';
+          row.last_error = args[0];
+          row.next_retry_at = args[1];
+          row.locked_at = null;
+          row.locked_by = null;
+          row.lock_expires_at = null;
           row.updated_at = args[2];
           changes = 1;
         }
@@ -226,6 +358,9 @@ function createMockD1(): D1Database {
           if (row.status === 'queued' || row.status === 'retrying') {
             row.status = 'cancelled';
             row.last_error = args[0];
+            row.locked_at = null;
+            row.locked_by = null;
+            row.lock_expires_at = null;
             row.updated_at = args[1];
             changes += 1;
           }
@@ -294,6 +429,20 @@ function createMockD1(): D1Database {
           published_at: args[22],
         });
         changes = 1;
+      } else if (normalized.startsWith('INSERT INTO media_assets')) {
+        mediaAssets.set(args[0] as string, {
+          key: args[0],
+          content_type: args[1],
+          size_bytes: args[2],
+          etag: args[3],
+          data_base64: args[4],
+          metadata_json: args[5],
+          created_at: args[6],
+          updated_at: args[7],
+        });
+        changes = 1;
+      } else if (normalized.startsWith('DELETE FROM media_assets')) {
+        changes = mediaAssets.delete(args[0] as string) ? 1 : 0;
       } else if (normalized.startsWith('INSERT INTO ad_configs')) {
         adConfigs.set(args[0] as string, {
           id: args[0],
@@ -360,7 +509,7 @@ function createMockD1(): D1Database {
     } as unknown as D1PreparedStatement;
   };
 
-  return {
+  const db = {
     prepare: (sql: string) => makeStmt(sql),
     batch: async () => [],
     exec: async () => ({ count: 0, duration: 0 }),
@@ -369,21 +518,17 @@ function createMockD1(): D1Database {
       throw new Error('Not implemented in mock');
     },
   } as unknown as D1Database;
+
+  return { db, tasks };
 }
 
 function createTestEnv(overrides: Partial<WorkerEnv> = {}): {
   env: WorkerEnv;
-  sentQueueMessages: QueueTaskMessage[];
+  tasks: Map<string, Record<string, unknown>>;
 } {
-  const sentQueueMessages: QueueTaskMessage[] = [];
+  const { db, tasks } = createMockD1();
   const env: WorkerEnv = {
-    DB: createMockD1(),
-    TASK_QUEUE: {
-      send: async (msg: QueueTaskMessage) => {
-        sentQueueMessages.push(msg);
-      },
-      sendBatch: async () => {},
-    } as unknown as Queue<QueueTaskMessage>,
+    DB: db,
     SERVICE_NAME: 'autoblogger-ai',
     ENVIRONMENT: 'test',
     ALLOW_API_KEY_AUTH: 'true',
@@ -398,7 +543,7 @@ function createTestEnv(overrides: Partial<WorkerEnv> = {}): {
     DEFAULT_BLOGGER_BLOG_ID: '1234567890',
     ...overrides,
   };
-  return { env, sentQueueMessages };
+  return { env, tasks };
 }
 
 const pendingWaitUntil: Promise<unknown>[] = [];
@@ -409,13 +554,13 @@ const dummyCtx = {
   passThroughOnException: () => {},
 } as unknown as ExecutionContext;
 
-describe('AUTOBLOGGER AI Cloudflare Worker', () => {
+describe('AUTOBLOGGER AI Cloudflare Free-Plan Worker', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     pendingWaitUntil.length = 0;
   });
 
-  it('GET /health returns 200 OK with platform: cloudflare-workers for Android verification', async () => {
+  it('GET /health returns 200 OK with Free-plan D1 queue/media status for Android verification', async () => {
     const { env } = createTestEnv();
     const res = await workerEntry.fetch(new Request('https://worker.example/health'), env, dummyCtx);
     expect(res.status).toBe(200);
@@ -427,6 +572,9 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     expect(body.runtime).toBe('cloudflare-workers');
     expect(body.dbConnected).toBe(true);
     expect(body.queueConfigured).toBe(true);
+    expect(body.queueBackend).toBe('d1');
+    expect(body.r2Configured).toBe(false);
+    expect(body.mediaStorageBackend).toBe('d1');
     expect(body.agentStatus).toBe('running');
   });
 
@@ -451,7 +599,7 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     expect(body.agent.status).toBe('running');
   });
 
-  it('supports pause, resume, and emergency stop cancelling pending tasks', async () => {
+  it('supports pause, resume, and emergency stop cancelling pending D1 jobs', async () => {
     const { env } = createTestEnv();
 
     const enqueueRes = await workerEntry.fetch(
@@ -520,7 +668,6 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
       GEMINI_API_KEY: undefined,
     });
 
-    // Update manual provider priority first
     const priorityRes = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/ai/providers/priority', {
         method: 'PUT',
@@ -576,22 +723,22 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('processes Cloudflare Queue batch messages and Cron Triggers including weekly SEO & content checks', async () => {
-    const { env, sentQueueMessages } = createTestEnv();
+  it('processes persistent D1 jobs via Cron Triggers, enforces lock recovery, backoff, and Pause/Resume', async () => {
+    const { env, tasks } = createTestEnv();
 
-    await workerEntry.scheduled(
-      { cron: '55 23 * * 0', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
+    // 1. Pause agent and enqueue a job -> Cron must NOT burn attempts while paused
+    await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/agent/pause', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'test-super-secret-api-key-123456',
+        },
+        body: JSON.stringify({ reason: 'Maintenance pause' }),
+      }),
       env,
       dummyCtx
     );
-    await Promise.all(pendingWaitUntil);
-
-    expect(sentQueueMessages).toHaveLength(3);
-    expect(sentQueueMessages.map((m) => m.type)).toEqual([
-      'SYNC_ANALYTICS_WEEKLY',
-      'SEO_AUDIT_BATCH',
-      'CONTENT_UPDATE_CHECK',
-    ]);
 
     const enq = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/tasks/enqueue', {
@@ -602,48 +749,101 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
         },
         body: JSON.stringify({
           type: 'SEND_NOTIFICATION',
-          payload: { title: 'Test', body: 'Queue works' },
+          payload: { title: 'D1 Queue', body: 'Executed via Cron' },
         }),
       }),
       env,
       dummyCtx
     );
-    const enqJson = (await enq.json()) as { task: { id: string } };
+    expect(enq.status).toBe(202);
+    const enqJson = (await enq.json()) as { task: { id: string }; queueBackend: string };
+    expect(enqJson.queueBackend).toBe('d1');
 
-    let acked = false;
-    await workerEntry.queue(
-      {
-        queue: 'autoblogger-tasks',
-        ackAll: () => {},
-        retryAll: () => {},
-        messages: [
-          {
-            id: 'msg-1',
-            timestamp: new Date(),
-            attempts: 1,
-            body: {
-              taskId: enqJson.task.id,
-              type: 'SEND_NOTIFICATION',
-              enqueuedAt: new Date().toISOString(),
-            },
-            ack: () => {
-              acked = true;
-            },
-            retry: () => {},
-          },
-        ],
-      } as unknown as MessageBatch<QueueTaskMessage>,
+    // Run 15-min Cron while paused
+    await workerEntry.scheduled(
+      { cron: '*/15 * * * *', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
+      env,
+      dummyCtx
+    );
+    await Promise.all(pendingWaitUntil);
+    pendingWaitUntil.length = 0;
+
+    expect(tasks.get(enqJson.task.id)?.status).toBe('queued');
+    expect(tasks.get(enqJson.task.id)?.attempts).toBe(0);
+
+    // 2. Simulate an expired lock on another processing job
+    const staleId = 'stale-locked-job';
+    tasks.set(staleId, {
+      id: staleId,
+      idempotency_key: null,
+      type: 'SEND_NOTIFICATION',
+      payload_json: JSON.stringify({ title: 'Recovered', body: 'Stale lock' }),
+      status: 'processing',
+      priority: 1,
+      attempts: 1,
+      max_attempts: 3,
+      next_retry_at: null,
+      locked_at: new Date(Date.now() - 300_000).toISOString(),
+      locked_by: 'crashed-worker',
+      lock_expires_at: new Date(Date.now() - 60_000).toISOString(),
+      started_at: new Date(Date.now() - 300_000).toISOString(),
+      last_error: null,
+      result_json: null,
+      created_by: 'test',
+      created_at: new Date(Date.now() - 300_000).toISOString(),
+      updated_at: new Date(Date.now() - 300_000).toISOString(),
+      completed_at: null,
+    });
+
+    // 3. Resume agent -> Cron recovers stale lock and completes due jobs
+    await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/agent/resume', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'test-super-secret-api-key-123456',
+        },
+        body: JSON.stringify({ reason: 'Resuming' }),
+      }),
       env,
       dummyCtx
     );
 
-    expect(acked).toBe(true);
+    await workerEntry.scheduled(
+      { cron: '*/15 * * * *', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
+      env,
+      dummyCtx
+    );
+    await Promise.all(pendingWaitUntil);
+    pendingWaitUntil.length = 0;
+
+    expect(tasks.get(staleId)?.status).toBe('completed');
+    expect(tasks.get(enqJson.task.id)?.status).toBe('completed');
+
+    // 4. Verify weekly cron enqueues all 3 weekly maintenance jobs into D1 & runs bounded batch
+    await workerEntry.scheduled(
+      { cron: '55 23 * * 0', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
+      env,
+      dummyCtx
+    );
+    await Promise.all(pendingWaitUntil);
+
+    const statsRes = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/tasks/stats', {
+        headers: { 'X-API-Key': 'test-super-secret-api-key-123456' },
+      }),
+      env,
+      dummyCtx
+    );
+    expect(statsRes.status).toBe(200);
+    const statsBody = (await statsRes.json()) as { stats: { completed: number; total: number } };
+    expect(statsBody.stats.completed).toBeGreaterThanOrEqual(5);
+    expect(statsBody.stats.total).toBeGreaterThanOrEqual(5);
   });
 
   it('enforces SEO quality gate, alt text validation, and Adsterra device/density placement', async () => {
     const { env } = createTestEnv();
 
-    // Flag missing image alt text & placeholder text
     const badSeoRes = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/seo/audit', {
         method: 'POST',
@@ -669,7 +869,6 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     expect(badAudit.audit.passedQualityGate).toBe(false);
     expect(badAudit.audit.imagesMissingAlt).toBe(1);
 
-    // Save desktop-targeted between_sections ad config and preview injection
     const adSave = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/adsterra/configs', {
         method: 'POST',
@@ -762,5 +961,47 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     };
     expect(insights.periodDays).toBe(7);
     expect(insights.recommendations.length).toBeGreaterThan(0);
+  });
+
+  it('stores, retrieves, and deletes media assets in D1 without requiring R2', async () => {
+    const { env } = createTestEnv();
+
+    const uploadRes = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/media/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+          'X-API-Key': 'test-super-secret-api-key-123456',
+          'X-Media-Key': 'posts/test-backup.txt',
+        },
+        body: 'Free-plan D1 media archive content',
+      }),
+      env,
+      dummyCtx
+    );
+    expect(uploadRes.status).toBe(201);
+    const uploadJson = (await uploadRes.json()) as { uploaded: { key: string; storage: string } };
+    expect(uploadJson.uploaded.key).toBe('posts/test-backup.txt');
+    expect(uploadJson.uploaded.storage).toBe('d1');
+
+    const getRes = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/media/posts/test-backup.txt', {
+        headers: { 'X-API-Key': 'test-super-secret-api-key-123456' },
+      }),
+      env,
+      dummyCtx
+    );
+    expect(getRes.status).toBe(200);
+    expect(await getRes.text()).toBe('Free-plan D1 media archive content');
+
+    const delRes = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/media/posts/test-backup.txt', {
+        method: 'DELETE',
+        headers: { 'X-API-Key': 'test-super-secret-api-key-123456' },
+      }),
+      env,
+      dummyCtx
+    );
+    expect(delRes.status).toBe(204);
   });
 });

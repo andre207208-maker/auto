@@ -32,29 +32,6 @@
       "migrations_dir": "migrations"
     }
   ],
-  "queues": {
-    "producers": [
-      {
-        "binding": "TASK_QUEUE",
-        "queue": "autoblogger-tasks"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "autoblogger-tasks",
-        "max_batch_size": 5,
-        "max_batch_timeout": 5,
-        "max_retries": 3,
-        "dead_letter_queue": "autoblogger-tasks-dlq"
-      }
-    ]
-  },
-  "r2_buckets": [
-    {
-      "binding": "MEDIA_BUCKET",
-      "bucket_name": "autoblogger-media"
-    }
-  ],
   "triggers": {
     "crons": [
       "*/15 * * * *",

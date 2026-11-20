@@ -2,17 +2,9 @@ export type AIProviderName = 'gemini' | 'openrouter' | 'apinex' | 'custom';
 
 export type AgentStatus = 'running' | 'paused' | 'stopped';
 
-export interface QueueTaskMessage {
-  taskId: string;
-  type: TaskType;
-  enqueuedAt: string;
-}
-
 export interface WorkerEnv {
-  // Cloudflare Bindings
+  // Cloudflare Free Plan Bindings (D1 only — no paid Queues or R2 required)
   DB: D1Database;
-  TASK_QUEUE?: Queue<QueueTaskMessage>;
-  MEDIA_BUCKET?: R2Bucket;
 
   // Non-secret vars (wrangler.jsonc)
   SERVICE_NAME?: string;
@@ -192,15 +184,34 @@ export type TaskStatus =
   | 'dead_letter'
   | 'cancelled';
 
+export type TaskStatusFilter = TaskStatus | 'pending' | 'failed';
+
+export interface TaskQueueStats {
+  pending: number;
+  queued: number;
+  processing: number;
+  retrying: number;
+  completed: number;
+  failed: number;
+  deadLetter: number;
+  cancelled: number;
+  total: number;
+}
+
 export interface PersistentTask<T = Record<string, unknown>> {
   id: string;
   idempotencyKey?: string | null;
   type: TaskType;
   payload: T;
   status: TaskStatus;
+  priority?: number;
   attempts: number;
   maxAttempts: number;
   nextRetryAt: string | null;
+  lockedAt?: string | null;
+  lockedBy?: string | null;
+  lockExpiresAt?: string | null;
+  startedAt?: string | null;
   lastError: string | null;
   result?: Record<string, unknown> | null;
   createdBy: string;

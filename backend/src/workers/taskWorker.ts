@@ -11,8 +11,9 @@ import {
   enqueueTask,
   failOrRetryTask,
   listDueRetryTasks,
+  releaseExpiredLocks,
 } from '../services/taskQueueService.js';
-import { QueueTaskMessage, WorkerEnv } from '../types/index.js';
+import { TaskType, WorkerEnv } from '../types/index.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -28,23 +29,68 @@ import {
   startAutonomousPipeline,
 } from './publishWorker.js';
 
+const DEFAULT_CRON_JOB_BATCH_SIZE = 3;
+const DEFAULT_MAX_WALL_MS = 20_000;
+
+const AGENT_GATED_TASK_TYPES = new Set<TaskType>([
+  'PIPELINE_RESEARCH',
+  'PIPELINE_GENERATE',
+  'PIPELINE_OPTIMIZE_AND_PUBLISH',
+  'GENERATE_AND_PUBLISH',
+  'RESEARCH_TOPIC',
+  'GENERATE_ARTICLE',
+]);
+
 export async function executeTaskById(
   env: WorkerEnv,
-  taskId: string
+  taskId: string,
+  workerId = `worker-${crypto.randomUUID().slice(0, 8)}`
 ): Promise<{
   taskId: string;
   status: string;
-  shouldRetryMessage?: boolean;
-  delaySeconds?: number;
   result?: Record<string, unknown>;
   error?: string;
 }> {
-  const claimed = await claimTask(env, taskId);
+  const preState = await getAgentState(env);
+  if (preState.emergencyStop || preState.status === 'stopped') {
+    return {
+      taskId,
+      status: 'skipped_emergency_stop',
+      error: preState.reason || 'Agent stopped by emergency stop',
+    };
+  }
+  if (preState.status === 'paused') {
+    return {
+      taskId,
+      status: 'skipped_paused',
+      error: preState.reason || 'Agent is paused',
+    };
+  }
+
+  const claimed = await claimTask(env, taskId, workerId, 120);
   if (!claimed) {
-    return { taskId, status: 'skipped_or_already_claimed', shouldRetryMessage: false };
+    return { taskId, status: 'skipped_or_already_claimed' };
   }
 
   try {
+    if (AGENT_GATED_TASK_TYPES.has(claimed.type)) {
+      const state = await getAgentState(env);
+      if (state.emergencyStop || state.status === 'stopped') {
+        throw new AppError(
+          `Autonomous agent is halted by emergency stop${state.reason ? `: ${state.reason}` : ''}`,
+          423,
+          'AGENT_EMERGENCY_STOPPED'
+        );
+      }
+      if (state.status === 'paused') {
+        throw new AppError(
+          `Autonomous agent is paused${state.reason ? `: ${state.reason}` : ''}`,
+          423,
+          'AGENT_PAUSED'
+        );
+      }
+    }
+
     let result: Record<string, unknown>;
 
     switch (claimed.type) {
@@ -141,7 +187,7 @@ export async function executeTaskById(
     }
 
     await completeTask(env, claimed.id, result);
-    return { taskId: claimed.id, status: 'completed', shouldRetryMessage: false, result };
+    return { taskId: claimed.id, status: 'completed', result };
   } catch (err) {
     const failure = await failOrRetryTask(env, claimed, err);
 
@@ -160,7 +206,7 @@ export async function executeTaskById(
       }
     }
 
-    logger.error('Task execution failed', {
+    logger.error('D1 job execution failed', {
       taskId: claimed.id,
       type: claimed.type,
       attempts: claimed.attempts,
@@ -171,8 +217,8 @@ export async function executeTaskById(
     await logSystemEvent(
       env.DB,
       'error',
-      'task_worker',
-      `Task ${claimed.id} (${claimed.type}) failed`,
+      'd1_job_worker',
+      `Job ${claimed.id} (${claimed.type}) failed`,
       {
         attempts: claimed.attempts,
         nextStatus: failure.status,
@@ -183,8 +229,8 @@ export async function executeTaskById(
     if (failure.status === 'dead_letter') {
       try {
         await sendNotification(env, {
-          title: 'AUTOBLOGGER Task Dead-Letter Alert',
-          body: `Task ${claimed.type} failed permanently after ${claimed.attempts} attempts.`,
+          title: 'AUTOBLOGGER Job Failed Permanently',
+          body: `Job ${claimed.type} moved to dead_letter after ${claimed.attempts} attempts.`,
           data: { event: 'task_dead_letter', taskId: claimed.id },
         });
       } catch {
@@ -195,55 +241,86 @@ export async function executeTaskById(
     return {
       taskId: claimed.id,
       status: failure.status,
-      shouldRetryMessage: failure.status === 'retrying',
-      delaySeconds: failure.delaySeconds,
       error: failure.message,
     };
   }
 }
 
-export async function processDueRetryQueue(
+export async function processD1JobBatch(
   env: WorkerEnv,
-  limit = 10
+  options?: { limit?: number; workerId?: string; maxWallMs?: number }
 ): Promise<{
   processed: number;
+  recoveredLocks: number;
+  skippedReason?: 'paused' | 'emergency_stop';
   outcomes: Array<{ taskId: string; status: string; error?: string }>;
 }> {
-  const dueTasks = await listDueRetryTasks(env, limit);
+  const state = await getAgentState(env);
+  if (state.emergencyStop || state.status === 'stopped') {
+    logger.info('Skipping D1 job batch because agent is stopped', {
+      status: state.status,
+      emergencyStop: state.emergencyStop,
+    });
+    return {
+      processed: 0,
+      recoveredLocks: 0,
+      skippedReason: 'emergency_stop',
+      outcomes: [],
+    };
+  }
+  if (state.status === 'paused') {
+    logger.info('Skipping D1 job batch because agent is paused', { status: state.status });
+    return {
+      processed: 0,
+      recoveredLocks: 0,
+      skippedReason: 'paused',
+      outcomes: [],
+    };
+  }
+
+  const recoveredLocks = await releaseExpiredLocks(env);
+  const safeLimit = Math.min(Math.max(1, options?.limit ?? DEFAULT_CRON_JOB_BATCH_SIZE), 5);
+  const workerId = options?.workerId || `cron-${crypto.randomUUID().slice(0, 8)}`;
+  const maxWallMs = options?.maxWallMs ?? DEFAULT_MAX_WALL_MS;
+  const startedAt = Date.now();
+
+  const dueTasks = await listDueRetryTasks(env, safeLimit);
   const outcomes: Array<{ taskId: string; status: string; error?: string }> = [];
 
   for (const task of dueTasks) {
-    const outcome = await executeTaskById(env, task.id);
+    if (outcomes.length > 0 && Date.now() - startedAt >= maxWallMs) {
+      logger.info('Stopping D1 job batch early to stay within Free Worker execution budget', {
+        processed: outcomes.length,
+        elapsedMs: Date.now() - startedAt,
+      });
+      break;
+    }
+
+    const outcome = await executeTaskById(env, task.id, workerId);
     outcomes.push({ taskId: outcome.taskId, status: outcome.status, error: outcome.error });
   }
 
   return {
     processed: outcomes.length,
+    recoveredLocks,
     outcomes,
   };
 }
 
-/**
- * Cloudflare Queues Consumer Handler
- */
-export async function handleQueueBatch(
-  batch: MessageBatch<QueueTaskMessage>,
-  env: WorkerEnv
-): Promise<void> {
-  for (const message of batch.messages) {
-    const { taskId } = message.body;
-    const outcome = await executeTaskById(env, taskId);
-
-    if (outcome.shouldRetryMessage) {
-      message.retry({ delaySeconds: Math.max(10, outcome.delaySeconds || 30) });
-    } else {
-      message.ack();
-    }
-  }
+export async function processDueRetryQueue(
+  env: WorkerEnv,
+  limit = DEFAULT_CRON_JOB_BATCH_SIZE
+): Promise<{
+  processed: number;
+  recoveredLocks: number;
+  skippedReason?: 'paused' | 'emergency_stop';
+  outcomes: Array<{ taskId: string; status: string; error?: string }>;
+}> {
+  return processD1JobBatch(env, { limit, workerId: 'manual-retry-sweep' });
 }
 
 /**
- * Cloudflare Cron Triggers Scheduled Handler
+ * Cloudflare Free-Plan Cron Triggers Handler (replaces paid Cloudflare Queues)
  */
 export async function handleScheduledCron(
   controller: ScheduledController,
@@ -254,42 +331,53 @@ export async function handleScheduledCron(
 
   logger.info('Cloudflare Cron Trigger fired', { cron });
 
+  const state = await getAgentState(env);
+
   // 1. Daily Analytics Sync & Traffic Drop Insights (50 23 * * *)
   if (cron === '50 23 * * *') {
-    await enqueueTask(env, {
-      type: 'SYNC_ANALYTICS_DAILY',
-      createdBy: 'cron:daily',
-      idempotencyKey: `cron:analytics:daily:${dateKey.slice(0, 10)}`,
-      payload: { cron },
-    });
+    if (!state.emergencyStop && state.status !== 'stopped') {
+      await enqueueTask(env, {
+        type: 'SYNC_ANALYTICS_DAILY',
+        createdBy: 'cron:daily',
+        priority: 3,
+        idempotencyKey: `cron:analytics:daily:${dateKey.slice(0, 10)}`,
+        payload: { cron },
+      });
+      await processD1JobBatch(env, { limit: 2, workerId: 'cron:daily' });
+    }
     return;
   }
 
   // 2. Weekly Analytics, SEO Batch Audit & Content Freshness Check (55 23 * * 0)
   if (cron === '55 23 * * 0') {
-    await enqueueTask(env, {
-      type: 'SYNC_ANALYTICS_WEEKLY',
-      createdBy: 'cron:weekly',
-      idempotencyKey: `cron:analytics:weekly:${dateKey.slice(0, 10)}`,
-      payload: { cron },
-    });
-    await enqueueTask(env, {
-      type: 'SEO_AUDIT_BATCH',
-      createdBy: 'cron:weekly',
-      idempotencyKey: `cron:seo-audit:${dateKey.slice(0, 10)}`,
-      payload: { cron },
-    });
-    await enqueueTask(env, {
-      type: 'CONTENT_UPDATE_CHECK',
-      createdBy: 'cron:weekly',
-      idempotencyKey: `cron:content-update:${dateKey.slice(0, 10)}`,
-      payload: { cron },
-    });
+    if (!state.emergencyStop && state.status !== 'stopped') {
+      await enqueueTask(env, {
+        type: 'SYNC_ANALYTICS_WEEKLY',
+        createdBy: 'cron:weekly',
+        priority: 3,
+        idempotencyKey: `cron:analytics:weekly:${dateKey.slice(0, 10)}`,
+        payload: { cron },
+      });
+      await enqueueTask(env, {
+        type: 'SEO_AUDIT_BATCH',
+        createdBy: 'cron:weekly',
+        priority: 4,
+        idempotencyKey: `cron:seo-audit:${dateKey.slice(0, 10)}`,
+        payload: { cron },
+      });
+      await enqueueTask(env, {
+        type: 'CONTENT_UPDATE_CHECK',
+        createdBy: 'cron:weekly',
+        priority: 4,
+        idempotencyKey: `cron:content-update:${dateKey.slice(0, 10)}`,
+        payload: { cron },
+      });
+      await processD1JobBatch(env, { limit: 3, workerId: 'cron:weekly' });
+    }
     return;
   }
 
-  // 3. Default periodic tick (*/15 * * * *): run autonomous scheduler & process due retries
-  const state = await getAgentState(env);
+  // 3. Periodic tick (*/15 * * * *): schedule due campaigns & process bounded batch of D1 jobs
   if (!state.emergencyStop && state.status === 'running') {
     await runSchedulerTick(env, 'cron:scheduler');
   } else {
@@ -299,5 +387,5 @@ export async function handleScheduledCron(
     });
   }
 
-  await processDueRetryQueue(env, 5);
+  await processD1JobBatch(env, { limit: DEFAULT_CRON_JOB_BATCH_SIZE, workerId: 'cron:15m' });
 }

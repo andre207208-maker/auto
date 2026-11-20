@@ -1,6 +1,6 @@
 # AUTOBLOGGER AI — Cloudflare Workers Backend
 
-Production-ready **Cloudflare Workers + TypeScript + Hono + D1 + Queues + Cron Triggers + R2** backend for **AUTOBLOGGER AI**, migrated from Node.js/Express/Firebase/Cloud Run to Cloudflare's Free-compatible serverless edge architecture.
+Production-ready **Cloudflare Workers + TypeScript + Hono + D1 + Cron Triggers** backend for **AUTOBLOGGER AI**, engineered 100% for the **Cloudflare Workers Free Plan** (no paid Queues, no R2 billing card required).
 
 ---
 
@@ -8,11 +8,11 @@ Production-ready **Cloudflare Workers + TypeScript + Hono + D1 + Queues + Cron T
 
 | Layer | Technology | Binding / File |
 | :--- | :--- | :--- |
-| Edge HTTP / Queue / Cron | Cloudflare Workers + Hono | `src/index.ts` |
-| Relational Persistence | Cloudflare D1 (SQLite) | `DB` (`migrations/0001_initial_schema.sql`, `migrations/0002_settings_and_ratelimits.sql`, `src/db/repositories.ts`) |
-| Async Jobs & Pipelines | Cloudflare Queues + D1 Idempotency | `TASK_QUEUE` (`src/services/taskQueueService.ts`, `src/workers/`) |
+| Edge HTTP & Cron | Cloudflare Workers + Hono | `src/index.ts` |
+| Relational Persistence | Cloudflare D1 (SQLite) | `DB` (`migrations/0001_initial_schema.sql`, `migrations/0002_settings_and_ratelimits.sql`, `migrations/0003_d1_job_queue_and_media.sql`, `src/db/repositories.ts`) |
+| Async Persistent Job Queue | D1 `task_queue` + Locking & Backoff | `src/services/taskQueueService.ts`, `src/workers/taskWorker.ts` |
 | Scheduled Automation | Cloudflare Cron Triggers | `triggers.crons` (`*/15 * * * *`, `50 23 * * *`, `55 23 * * 0`) |
-| Optional Media Storage | Cloudflare R2 | `MEDIA_BUCKET` (`src/services/r2MediaService.ts`) |
+| Free-Plan Media Archive | D1 `media_assets` table | `src/services/r2MediaService.ts` |
 | Multi-Key AI Failover | Gemini, OpenRouter, API-NEX, Custom | `src/services/aiProviderManager.ts` (key rotation, D1 circuit breaker, priority override) |
 | Web Research | Tavily Search API + AI Synthesis | `src/services/researchService.ts` |
 | SEO Quality Gate | Audit, Alt Text, Canonical, JSON-LD & Anti-Duplicate | `src/services/seoService.ts` |
@@ -21,10 +21,10 @@ Production-ready **Cloudflare Workers + TypeScript + Hono + D1 + Queues + Cron T
 | Push & Inbox Alerts | WebCrypto FCM HTTP v1 + D1 `notifications` | `src/services/fcmService.ts` |
 
 ### Free Plan Asynchronous Pipeline Design
-To stay safely within Cloudflare Workers Free CPU/execution limits, `POST /api/v1/content/publish-pipeline` never runs research + generation + Blogger publishing synchronously in one HTTP call. Instead, it creates a `pipeline_runs` row in D1 and chains 3 small Queue stages:
+To stay safely within Cloudflare Workers Free CPU/execution limits, `POST /api/v1/content/publish-pipeline` never runs research + generation + Blogger publishing synchronously in one HTTP call. Instead, it creates a `pipeline_runs` row in D1 and chains 3 small prioritized D1 jobs processed via Cron Triggers (max 3 jobs per Cron sweep, with atomic D1 locks and stale-lock recovery):
 1. `PIPELINE_RESEARCH` (Tavily + AI keyword, search-intent & competition research)
 2. `PIPELINE_GENERATE` (long-form HTML article generation with D1 internal link targets)
-3. `PIPELINE_OPTIMIZE_AND_PUBLISH` (duplicate hash prevention, pre-publish quality gate, SEO audit + JSON-LD, structure-aware Adsterra injection, optional R2 HTML backup, Blogger publish, D1 & FCM notification)
+3. `PIPELINE_OPTIMIZE_AND_PUBLISH` (duplicate hash prevention, pre-publish quality gate, SEO audit + JSON-LD, structure-aware Adsterra injection, D1 HTML archive backup, Blogger publish, D1 & FCM notification)
 
 ---
 
@@ -95,10 +95,10 @@ npx wrangler secret put GOOGLE_OAUTH_REFRESH_TOKEN
 ## GitHub Actions Deployment
 
 Workflow: `/.github/workflows/cloudflare-deploy.yml`. Add these **GitHub Repository Secrets**:
-- `CLOUDFLARE_API_TOKEN` (Workers Scripts Edit, D1 Edit, Queues Edit, R2 Edit)
+- `CLOUDFLARE_API_TOKEN` (Workers Scripts Edit, D1 Edit, Account Settings Read)
 - `CLOUDFLARE_ACCOUNT_ID`
 
-*(Important: Connecting GitHub to Cloudflare Workers deploys code only; you must create the D1 database, Queues, and optional R2 bucket in Cloudflare Dashboard first and update `database_id` in `backend/wrangler.jsonc`.)*
+*(Important: No paid Cloudflare Queues or R2 bindings are required. You only need the D1 database `autoblogger-db` configured in `backend/wrangler.jsonc`.)*
 
 ## Bengali Deployment Guide
 

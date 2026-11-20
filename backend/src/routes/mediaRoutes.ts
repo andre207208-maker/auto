@@ -29,13 +29,15 @@ mediaRoutes.get('/:key{.+}', async (c) => {
   const key = c.req.param('key');
   const object = await getMediaFromR2(c.env, key);
   if (!object) {
-    throw new AppError('Object not found in R2', 404, 'MEDIA_NOT_FOUND');
+    throw new AppError('Media asset not found', 404, 'MEDIA_NOT_FOUND');
   }
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set('etag', object.httpEtag);
-  return new Response(object.body, { headers });
+  const bodyCopy = new Uint8Array(object.body.byteLength);
+  bodyCopy.set(object.body);
+  return new Response(bodyCopy.buffer, { headers });
 });
 
 mediaRoutes.delete('/:key{.+}', async (c) => {

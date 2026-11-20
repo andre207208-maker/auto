@@ -10,7 +10,9 @@ import {
   PersistentTask,
   PipelineRun,
   PipelineStage,
+  TaskQueueStats,
   TaskStatus,
+  TaskStatusFilter,
   TaskType,
 } from '../types/index.js';
 import { logger } from '../utils/logger.js';
@@ -235,7 +237,7 @@ export async function cancelPendingTasksForEmergencyStop(
   const res = await db
     .prepare(
       `UPDATE task_queue
-       SET status = 'cancelled', last_error = ?, updated_at = ?
+       SET status = 'cancelled', last_error = ?, locked_at = NULL, locked_by = NULL, lock_expires_at = NULL, updated_at = ?
        WHERE status IN ('queued', 'retrying')`
     )
     .bind(reason, now)
@@ -349,7 +351,7 @@ export async function upsertProviderHealthRow(
 }
 
 // ============================================================================
-// Task Queue Repository (Idempotent & Atomic Claim)
+// Task Queue Repository (Pure D1 Persistent Queue with Locking & Backoff)
 // ============================================================================
 interface TaskRow {
   id: string;
@@ -357,9 +359,14 @@ interface TaskRow {
   type: TaskType;
   payload_json: string;
   status: TaskStatus;
+  priority?: number;
   attempts: number;
   max_attempts: number;
   next_retry_at: string | null;
+  locked_at?: string | null;
+  locked_by?: string | null;
+  lock_expires_at?: string | null;
+  started_at?: string | null;
   last_error: string | null;
   result_json: string | null;
   created_by: string;
@@ -375,9 +382,14 @@ function mapTaskRow(row: TaskRow): PersistentTask {
     type: row.type,
     payload: JSON.parse(row.payload_json),
     status: row.status,
+    priority: row.priority ?? 5,
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
     nextRetryAt: row.next_retry_at,
+    lockedAt: row.locked_at ?? null,
+    lockedBy: row.locked_by ?? null,
+    lockExpiresAt: row.lock_expires_at ?? null,
+    startedAt: row.started_at ?? null,
     lastError: row.last_error,
     result: row.result_json ? JSON.parse(row.result_json) : null,
     createdBy: row.created_by,
@@ -404,9 +416,9 @@ export async function insertTaskIfNew(
   await db
     .prepare(
       `INSERT INTO task_queue (
-         id, idempotency_key, type, payload_json, status, attempts, max_attempts,
+         id, idempotency_key, type, payload_json, status, priority, attempts, max_attempts,
          next_retry_at, last_error, result_json, created_by, created_at, updated_at, completed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       task.id,
@@ -414,6 +426,7 @@ export async function insertTaskIfNew(
       task.type,
       JSON.stringify(task.payload),
       task.status,
+      task.priority ?? 5,
       task.attempts,
       task.maxAttempts,
       task.nextRetryAt,
@@ -439,9 +452,25 @@ export async function getTaskRowById(
 
 export async function listTaskRows(
   db: D1Database,
-  options?: { status?: TaskStatus; limit?: number }
+  options?: { status?: TaskStatusFilter; limit?: number }
 ): Promise<PersistentTask[]> {
   const safeLimit = Math.min(Math.max(1, options?.limit ?? 50), 200);
+  if (options?.status === 'pending') {
+    const res = await db
+      .prepare(
+        `SELECT * FROM task_queue WHERE status IN ('queued', 'retrying') ORDER BY priority ASC, created_at ASC LIMIT ?`
+      )
+      .bind(safeLimit)
+      .all<TaskRow>();
+    return res.results.map(mapTaskRow);
+  }
+  if (options?.status === 'failed') {
+    const res = await db
+      .prepare(`SELECT * FROM task_queue WHERE status = 'dead_letter' ORDER BY updated_at DESC LIMIT ?`)
+      .bind(safeLimit)
+      .all<TaskRow>();
+    return res.results.map(mapTaskRow);
+  }
   if (options?.status) {
     const res = await db
       .prepare(`SELECT * FROM task_queue WHERE status = ? ORDER BY created_at DESC LIMIT ?`)
@@ -456,18 +485,70 @@ export async function listTaskRows(
   return res.results.map(mapTaskRow);
 }
 
+export async function getTaskQueueStats(db: D1Database): Promise<TaskQueueStats> {
+  const res = await db
+    .prepare(`SELECT status, COUNT(*) AS cnt FROM task_queue GROUP BY status`)
+    .all<{ status: TaskStatus; cnt: number }>();
+
+  const counts: Record<TaskStatus, number> = {
+    queued: 0,
+    processing: 0,
+    retrying: 0,
+    completed: 0,
+    dead_letter: 0,
+    cancelled: 0,
+  };
+
+  for (const row of res.results) {
+    if (row.status in counts) {
+      counts[row.status] = Number(row.cnt || 0);
+    }
+  }
+
+  const total =
+    counts.queued +
+    counts.processing +
+    counts.retrying +
+    counts.completed +
+    counts.dead_letter +
+    counts.cancelled;
+
+  return {
+    pending: counts.queued + counts.retrying,
+    queued: counts.queued,
+    processing: counts.processing,
+    retrying: counts.retrying,
+    completed: counts.completed,
+    failed: counts.dead_letter,
+    deadLetter: counts.dead_letter,
+    cancelled: counts.cancelled,
+    total,
+  };
+}
+
 export async function claimTaskAtomically(
   db: D1Database,
-  taskId: string
+  taskId: string,
+  workerId = 'd1-cron-worker',
+  lockTtlSeconds = 120
 ): Promise<PersistentTask | null> {
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const lockExpiresAt = new Date(nowMs + Math.max(30, lockTtlSeconds) * 1000).toISOString();
+
   const updateRes = await db
     .prepare(
       `UPDATE task_queue
-       SET status = 'processing', attempts = attempts + 1, updated_at = ?
+       SET status = 'processing',
+           attempts = attempts + 1,
+           locked_at = ?,
+           locked_by = ?,
+           lock_expires_at = ?,
+           started_at = COALESCE(started_at, ?),
+           updated_at = ?
        WHERE id = ? AND status IN ('queued', 'retrying')`
     )
-    .bind(now, taskId)
+    .bind(now, workerId, lockExpiresAt, now, now, taskId)
     .run();
 
   if ((updateRes.meta.changes ?? 0) === 0) {
@@ -475,6 +556,48 @@ export async function claimTaskAtomically(
   }
 
   return getTaskRowById(db, taskId);
+}
+
+export async function releaseExpiredTaskLocks(db: D1Database): Promise<number> {
+  const nowIso = new Date().toISOString();
+
+  const deadRes = await db
+    .prepare(
+      `UPDATE task_queue
+       SET status = 'dead_letter',
+           last_error = COALESCE(last_error, 'Worker execution lock expired after max attempts'),
+           locked_at = NULL,
+           locked_by = NULL,
+           lock_expires_at = NULL,
+           next_retry_at = NULL,
+           updated_at = ?
+       WHERE status = 'processing'
+         AND lock_expires_at IS NOT NULL
+         AND lock_expires_at <= ?
+         AND attempts >= max_attempts`
+    )
+    .bind(nowIso, nowIso)
+    .run();
+
+  const retryRes = await db
+    .prepare(
+      `UPDATE task_queue
+       SET status = 'retrying',
+           last_error = 'Recovered expired D1 worker lock; scheduled for retry',
+           locked_at = NULL,
+           locked_by = NULL,
+           lock_expires_at = NULL,
+           next_retry_at = ?,
+           updated_at = ?
+       WHERE status = 'processing'
+         AND lock_expires_at IS NOT NULL
+         AND lock_expires_at <= ?
+         AND attempts < max_attempts`
+    )
+    .bind(nowIso, nowIso, nowIso)
+    .run();
+
+  return (deadRes.meta.changes ?? 0) + (retryRes.meta.changes ?? 0);
 }
 
 export async function completeTaskRow(
@@ -486,8 +609,15 @@ export async function completeTaskRow(
   await db
     .prepare(
       `UPDATE task_queue
-       SET status = 'completed', result_json = ?, last_error = NULL,
-           next_retry_at = NULL, completed_at = ?, updated_at = ?
+       SET status = 'completed',
+           result_json = ?,
+           last_error = NULL,
+           next_retry_at = NULL,
+           locked_at = NULL,
+           locked_by = NULL,
+           lock_expires_at = NULL,
+           completed_at = ?,
+           updated_at = ?
        WHERE id = ?`
     )
     .bind(JSON.stringify(result), now, now, taskId)
@@ -505,7 +635,13 @@ export async function failOrRetryTaskRow(
     await db
       .prepare(
         `UPDATE task_queue
-         SET status = 'dead_letter', last_error = ?, next_retry_at = NULL, updated_at = ?
+         SET status = 'dead_letter',
+             last_error = ?,
+             next_retry_at = NULL,
+             locked_at = NULL,
+             locked_by = NULL,
+             lock_expires_at = NULL,
+             updated_at = ?
          WHERE id = ?`
       )
       .bind(errorMessage, now.toISOString(), task.id)
@@ -518,7 +654,13 @@ export async function failOrRetryTaskRow(
   await db
     .prepare(
       `UPDATE task_queue
-       SET status = 'retrying', last_error = ?, next_retry_at = ?, updated_at = ?
+       SET status = 'retrying',
+           last_error = ?,
+           next_retry_at = ?,
+           locked_at = NULL,
+           locked_by = NULL,
+           lock_expires_at = NULL,
+           updated_at = ?
        WHERE id = ?`
     )
     .bind(errorMessage, nextRetryAt, now.toISOString(), task.id)
@@ -526,17 +668,18 @@ export async function failOrRetryTaskRow(
   return { status: 'retrying', delaySeconds };
 }
 
-export async function listDueTaskRows(db: D1Database, limit = 15): Promise<PersistentTask[]> {
+export async function listDueTaskRows(db: D1Database, limit = 3): Promise<PersistentTask[]> {
+  const safeLimit = Math.min(Math.max(1, limit), 10);
   const nowIso = new Date().toISOString();
   const res = await db
     .prepare(
       `SELECT * FROM task_queue
        WHERE status IN ('queued', 'retrying')
          AND (next_retry_at IS NULL OR next_retry_at <= ?)
-       ORDER BY created_at ASC
+       ORDER BY priority ASC, created_at ASC
        LIMIT ?`
     )
-    .bind(nowIso, limit)
+    .bind(nowIso, safeLimit)
     .all<TaskRow>();
   return res.results.map(mapTaskRow);
 }
@@ -975,4 +1118,87 @@ export async function upsertAdConfigRow(
 
 export async function deleteAdConfigRow(db: D1Database, id: string): Promise<void> {
   await db.prepare(`DELETE FROM ad_configs WHERE id = ?`).bind(id).run();
+}
+
+// ============================================================================
+// Free-Plan D1 Media Assets Repository (Replaces R2 Bucket Requirement)
+// ============================================================================
+export interface MediaAssetRow {
+  key: string;
+  contentType: string;
+  sizeBytes: number;
+  etag: string;
+  dataBase64: string;
+  metadata?: Record<string, string> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function upsertMediaAssetRow(
+  db: D1Database,
+  asset: {
+    key: string;
+    contentType: string;
+    sizeBytes: number;
+    etag: string;
+    dataBase64: string;
+    metadata?: Record<string, string>;
+  }
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      `INSERT INTO media_assets (key, content_type, size_bytes, etag, data_base64, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         content_type = excluded.content_type,
+         size_bytes = excluded.size_bytes,
+         etag = excluded.etag,
+         data_base64 = excluded.data_base64,
+         metadata_json = excluded.metadata_json,
+         updated_at = excluded.updated_at`
+    )
+    .bind(
+      asset.key,
+      asset.contentType,
+      asset.sizeBytes,
+      asset.etag,
+      asset.dataBase64,
+      asset.metadata ? JSON.stringify(asset.metadata) : null,
+      now,
+      now
+    )
+    .run();
+}
+
+export async function getMediaAssetRow(db: D1Database, key: string): Promise<MediaAssetRow | null> {
+  const row = await db
+    .prepare(`SELECT * FROM media_assets WHERE key = ?`)
+    .bind(key)
+    .first<{
+      key: string;
+      content_type: string;
+      size_bytes: number;
+      etag: string;
+      data_base64: string;
+      metadata_json: string | null;
+      created_at: string;
+      updated_at: string;
+    }>();
+
+  if (!row) return null;
+  return {
+    key: row.key,
+    contentType: row.content_type,
+    sizeBytes: row.size_bytes,
+    etag: row.etag,
+    dataBase64: row.data_base64,
+    metadata: row.metadata_json ? JSON.parse(row.metadata_json) : null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function deleteMediaAssetRow(db: D1Database, key: string): Promise<void> {
+  await db.prepare(`DELETE FROM media_assets WHERE key = ?`).bind(key).run();
 }

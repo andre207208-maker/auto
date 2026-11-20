@@ -5,10 +5,10 @@ import { checkAndIncrementRateLimit } from './db/repositories.js';
 import { AppVariables } from './middleware/auth.js';
 import healthRoutes from './routes/healthRoutes.js';
 import apiRouter from './routes/index.js';
-import { QueueTaskMessage, WorkerEnv } from './types/index.js';
+import { WorkerEnv } from './types/index.js';
 import { AppError } from './utils/errors.js';
 import { logger } from './utils/logger.js';
-import { handleQueueBatch, handleScheduledCron } from './workers/taskWorker.js';
+import { handleScheduledCron } from './workers/taskWorker.js';
 
 export function createApp(): Hono<{ Bindings: WorkerEnv; Variables: AppVariables }> {
   const app = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
@@ -189,14 +189,6 @@ const app = createApp();
 export default {
   fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> | Response {
     return app.fetch(request, env, ctx);
-  },
-
-  async queue(
-    batch: MessageBatch<QueueTaskMessage>,
-    env: WorkerEnv,
-    _ctx: ExecutionContext
-  ): Promise<void> {
-    await handleQueueBatch(batch, env);
   },
 
   async scheduled(

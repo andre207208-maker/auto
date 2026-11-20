@@ -35,8 +35,8 @@ export interface PublishPipelineInput {
 }
 
 /**
- * Starts the 3-stage asynchronous pipeline on Cloudflare Queues so no single
- * Worker invocation runs multiple long AI calls synchronously.
+ * Starts the 3-stage asynchronous pipeline backed by the D1 persistent job queue
+ * so no single Worker invocation runs multiple long AI calls synchronously.
  */
 export async function startAutonomousPipeline(
   env: WorkerEnv,
@@ -63,6 +63,7 @@ export async function startAutonomousPipeline(
   const { task } = await enqueueTask(env, {
     type: 'PIPELINE_RESEARCH',
     createdBy: input.triggeredBy || 'api',
+    priority: 4,
     idempotencyKey: input.idempotencyKey
       ? `${input.idempotencyKey}:research`
       : `pipeline:${pipelineId}:research`,
@@ -104,6 +105,7 @@ export async function executePipelineResearchStage(
   const { task } = await enqueueTask(env, {
     type: 'PIPELINE_GENERATE',
     createdBy: run.triggeredBy,
+    priority: 3,
     idempotencyKey: `pipeline:${pipelineId}:generate`,
     payload: { pipelineId },
   });
@@ -165,6 +167,7 @@ export async function executePipelineGenerateStage(
   const { task } = await enqueueTask(env, {
     type: 'PIPELINE_OPTIMIZE_AND_PUBLISH',
     createdBy: run.triggeredBy,
+    priority: 2,
     idempotencyKey: `pipeline:${pipelineId}:publish`,
     payload: { pipelineId },
   });
@@ -250,24 +253,22 @@ export async function executePipelinePublishStage(
     finalHtml = await injectAdsIntoPostHtml(env, finalHtml);
   }
 
-  // Optional R2 archive backup of generated HTML
+  // Free-plan D1 archive backup of generated HTML (no R2 bucket required)
   let r2AssetKey: string | null = null;
-  if (env.MEDIA_BUCKET) {
-    try {
-      const key = `posts/${new Date().toISOString().slice(0, 10)}/${pipelineId}.html`;
-      await uploadMediaToR2(env, {
-        key,
-        body: finalHtml,
-        contentType: 'text/html; charset=utf-8',
-        metadata: { pipelineId, title: run.article.title },
-      });
-      r2AssetKey = key;
-    } catch (err) {
-      logger.warn('Optional R2 article backup failed; continuing publish', {
-        pipelineId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+  try {
+    const key = `posts/${new Date().toISOString().slice(0, 10)}/${pipelineId}.html`;
+    await uploadMediaToR2(env, {
+      key,
+      body: finalHtml,
+      contentType: 'text/html; charset=utf-8',
+      metadata: { pipelineId, title: run.article.title },
+    });
+    r2AssetKey = key;
+  } catch (err) {
+    logger.warn('Optional D1 article HTML backup failed; continuing publish', {
+      pipelineId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   const bloggerPost = await publishBloggerPost(env, {

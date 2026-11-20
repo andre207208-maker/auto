@@ -30,8 +30,10 @@ healthRoutes.get('/health', async (c) => {
       environment: c.env.ENVIRONMENT || 'production',
       timestamp: new Date().toISOString(),
       dbConnected,
-      queueConfigured: Boolean(c.env.TASK_QUEUE),
-      r2Configured: Boolean(c.env.MEDIA_BUCKET),
+      queueConfigured: dbConnected,
+      queueBackend: 'd1',
+      r2Configured: false,
+      mediaStorageBackend: 'd1',
       agentStatus,
     },
     200
@@ -51,8 +53,10 @@ healthRoutes.get('/api/v1/health/detailed', requireAuth, async (c) => {
     timestamp: new Date().toISOString(),
     bindings: {
       d1Database: dbConnected,
-      taskQueue: Boolean(c.env.TASK_QUEUE),
-      r2Bucket: Boolean(c.env.MEDIA_BUCKET),
+      taskQueue: dbConnected,
+      d1JobQueue: dbConnected,
+      d1MediaStorage: dbConnected,
+      r2Bucket: false,
     },
     configuredSecrets: {
       backendApiSecret: Boolean(c.env.BACKEND_API_SECRET && c.env.BACKEND_API_SECRET.length >= 16),
