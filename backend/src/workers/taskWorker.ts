@@ -348,8 +348,8 @@ export async function handleScheduledCron(
     return;
   }
 
-  // 2. Weekly Analytics, SEO Batch Audit & Content Freshness Check (55 23 * * 0)
-  if (cron === '55 23 * * 0') {
+  // 2. Weekly Analytics, SEO Batch Audit & Content Freshness Check (55 23 * * SUN)
+  if (cron === '55 23 * * SUN' || cron === '55 23 * * 1') {
     if (!state.emergencyStop && state.status !== 'stopped') {
       await enqueueTask(env, {
         type: 'SYNC_ANALYTICS_WEEKLY',

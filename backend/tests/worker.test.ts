@@ -822,7 +822,7 @@ describe('AUTOBLOGGER AI Cloudflare Free-Plan Worker', () => {
 
     // 4. Verify weekly cron enqueues all 3 weekly maintenance jobs into D1 & runs bounded batch
     await workerEntry.scheduled(
-      { cron: '55 23 * * 0', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
+      { cron: '55 23 * * SUN', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
       env,
       dummyCtx
     );

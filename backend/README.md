@@ -11,7 +11,7 @@ Production-ready **Cloudflare Workers + TypeScript + Hono + D1 + Cron Triggers**
 | Edge HTTP & Cron | Cloudflare Workers + Hono | `src/index.ts` |
 | Relational Persistence | Cloudflare D1 (SQLite) | `DB` (`migrations/0001_initial_schema.sql`, `migrations/0002_settings_and_ratelimits.sql`, `migrations/0003_d1_job_queue_and_media.sql`, `src/db/repositories.ts`) |
 | Async Persistent Job Queue | D1 `task_queue` + Locking & Backoff | `src/services/taskQueueService.ts`, `src/workers/taskWorker.ts` |
-| Scheduled Automation | Cloudflare Cron Triggers | `triggers.crons` (`*/15 * * * *`, `50 23 * * *`, `55 23 * * 0`) |
+| Scheduled Automation | Cloudflare Cron Triggers | `triggers.crons` (`*/15 * * * *`, `50 23 * * *`, `55 23 * * SUN`) |
 | Free-Plan Media Archive | D1 `media_assets` table | `src/services/r2MediaService.ts` |
 | Multi-Key AI Failover | Gemini, OpenRouter, API-NEX, Custom | `src/services/aiProviderManager.ts` (key rotation, D1 circuit breaker, priority override) |
 | Web Research | Tavily Search API + AI Synthesis | `src/services/researchService.ts` |
