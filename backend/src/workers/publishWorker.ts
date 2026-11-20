@@ -1,7 +1,9 @@
 import {
   createPipelineRun,
+  findDuplicatePost,
   getPipelineRunById,
   insertPostRecord,
+  listRecentInternalLinkTargets,
   logSystemEvent,
   updatePipelineRun,
 } from '../db/repositories.js';
@@ -12,7 +14,7 @@ import { generateArticle } from '../services/contentGeneratorService.js';
 import { sendNotification } from '../services/fcmService.js';
 import { uploadMediaToR2 } from '../services/r2MediaService.js';
 import { researchTopic } from '../services/researchService.js';
-import { appendJsonLdToHtml, auditSeo } from '../services/seoService.js';
+import { appendJsonLdToHtml, auditSeo, computeContentHash } from '../services/seoService.js';
 import { enqueueTask } from '../services/taskQueueService.js';
 import { AIProviderName, PipelineRun, WorkerEnv } from '../types/index.js';
 import { AppError } from '../utils/errors.js';
@@ -115,7 +117,7 @@ export async function executePipelineResearchStage(
 }
 
 /**
- * Stage 2: Long-form Article Generation -> enqueues Stage 3 (SEO, Ads, R2, Blogger)
+ * Stage 2: Long-form Article Generation (with D1 internal link targets) -> enqueues Stage 3
  */
 export async function executePipelineGenerateStage(
   env: WorkerEnv,
@@ -138,11 +140,18 @@ export async function executePipelineGenerateStage(
   const selectedTitle =
     run.research.suggestedTitles?.[0] || `${run.research.primaryKeyword} Complete Guide`;
 
+  const internalLinkTargets = await listRecentInternalLinkTargets(
+    env.DB,
+    run.blogId ?? env.DEFAULT_BLOGGER_BLOG_ID,
+    6
+  );
+
   const article = await generateArticle(env, {
     topic: selectedTitle,
     primaryKeyword: run.research.primaryKeyword,
     secondaryKeywords: run.research.secondaryKeywords,
     outline: run.research.outline,
+    internalLinkTargets,
     language: run.language,
     tone: run.tone ?? undefined,
     preferredProvider: run.preferredProvider ?? undefined,
@@ -170,7 +179,8 @@ export async function executePipelineGenerateStage(
 }
 
 /**
- * Stage 3: SEO Audit, JSON-LD, Adsterra Injection, optional R2 Backup, Blogger Publish, D1 & FCM
+ * Stage 3: Duplicate Check, Content Quality Gate, SEO Audit, JSON-LD, Adsterra Injection,
+ * optional R2 Backup, Blogger Publish, D1 Record & FCM Notification
  */
 export async function executePipelinePublishStage(
   env: WorkerEnv,
@@ -193,6 +203,9 @@ export async function executePipelinePublishStage(
     return run.result;
   }
 
+  const targetBlogId = run.blogId || env.DEFAULT_BLOGGER_BLOG_ID || '';
+  const internalLinkTargets = await listRecentInternalLinkTargets(env.DB, targetBlogId, 6);
+
   const seoAudit = auditSeo({
     title: run.article.title,
     metaDescription: run.article.metaDescription,
@@ -200,7 +213,36 @@ export async function executePipelinePublishStage(
     primaryKeyword: run.research.primaryKeyword,
     slug: run.article.slug,
     faqItems: run.article.faqItems,
+    internalLinkTargets,
+    minQualityWordCount: 300,
   });
+
+  const contentHash = await computeContentHash(run.article.title, run.article.htmlContent);
+  const duplicate = await findDuplicatePost(env.DB, {
+    slug: seoAudit.optimizedSlug,
+    contentHash,
+    blogId: targetBlogId,
+  });
+
+  if (duplicate) {
+    const errMsg = `Duplicate article prevented (matches "${duplicate.title}" at ${duplicate.bloggerUrl})`;
+    await updatePipelineRun(env.DB, pipelineId, {
+      stage: 'failed',
+      seo: seoAudit,
+      errorMessage: errMsg,
+    });
+    throw new AppError(errMsg, 409, 'DUPLICATE_ARTICLE_PREVENTED', { existingPost: duplicate });
+  }
+
+  if (!seoAudit.passedQualityGate) {
+    const errMsg = `Content failed pre-publish quality gate: ${seoAudit.issues.join(' | ')}`;
+    await updatePipelineRun(env.DB, pipelineId, {
+      stage: 'failed',
+      seo: seoAudit,
+      errorMessage: errMsg,
+    });
+    throw new AppError(errMsg, 422, 'QUALITY_GATE_FAILED', { issues: seoAudit.issues });
+  }
 
   let finalHtml = appendJsonLdToHtml(run.article.htmlContent, seoAudit.jsonLdSchema);
 
@@ -243,11 +285,13 @@ export async function executePipelinePublishStage(
     id: postRecordId,
     pipelineId,
     campaignId: run.campaignId ?? null,
-    blogId: run.blogId || env.DEFAULT_BLOGGER_BLOG_ID || '',
+    blogId: targetBlogId,
     bloggerPostId: bloggerPost.id,
     bloggerUrl: bloggerPost.url,
     title: run.article.title,
     slug: seoAudit.optimizedSlug,
+    contentHash,
+    canonicalUrl: bloggerPost.url || null,
     metaDescription: run.article.metaDescription,
     primaryKeyword: run.research.primaryKeyword,
     secondaryKeywords: run.research.secondaryKeywords,
@@ -271,6 +315,7 @@ export async function executePipelinePublishStage(
     primaryKeyword: run.research.primaryKeyword,
     seoScore: seoAudit.score,
     wordCount: run.article.wordCount,
+    contentHash,
     providerUsed: run.article.providerUsed,
     modelUsed: run.article.modelUsed,
     r2AssetKey,

@@ -18,6 +18,8 @@ const enqueueSchema = z.object({
     'GENERATE_ARTICLE',
     'SYNC_ANALYTICS_DAILY',
     'SYNC_ANALYTICS_WEEKLY',
+    'SEO_AUDIT_BATCH',
+    'CONTENT_UPDATE_CHECK',
     'SEND_NOTIFICATION',
     'INDEX_URL_CHECK',
   ]),

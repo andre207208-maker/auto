@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ZodError } from 'zod';
+import { checkAndIncrementRateLimit } from './db/repositories.js';
 import { AppVariables } from './middleware/auth.js';
 import healthRoutes from './routes/healthRoutes.js';
 import apiRouter from './routes/index.js';
@@ -12,13 +13,14 @@ import { handleQueueBatch, handleScheduledCron } from './workers/taskWorker.js';
 export function createApp(): Hono<{ Bindings: WorkerEnv; Variables: AppVariables }> {
   const app = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
 
-  // Request ID & timing middleware
+  // Request ID, security headers, and structured timing log
   app.use('*', async (c, next) => {
     const requestId = c.req.header('x-request-id') || crypto.randomUUID();
     c.set('requestId', requestId);
     c.header('X-Request-Id', requestId);
     c.header('X-Content-Type-Options', 'nosniff');
     c.header('X-Frame-Options', 'DENY');
+    c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
 
     const started = Date.now();
     await next();
@@ -64,10 +66,46 @@ export function createApp(): Hono<{ Bindings: WorkerEnv; Variables: AppVariables
     return corsMiddleware(c, next);
   });
 
+  // D1-backed edge sliding-window rate limiter on /api/v1/* (120 req/min per client IP)
+  app.use('/api/v1/*', async (c, next) => {
+    if (c.req.method === 'OPTIONS') {
+      return next();
+    }
+    const clientIp =
+      c.req.header('cf-connecting-ip') ||
+      c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
+      'unknown';
+    const bucketKey = `api:${clientIp}`;
+    const maxRequests = 120;
+    const windowMs = 60_000;
+
+    const rl = await checkAndIncrementRateLimit(c.env.DB, bucketKey, maxRequests, windowMs);
+    c.header('X-RateLimit-Limit', String(maxRequests));
+    c.header('X-RateLimit-Remaining', String(rl.remaining));
+    c.header('X-RateLimit-Reset', String(Math.ceil(rl.resetAt / 1000)));
+
+    if (!rl.allowed) {
+      const retryAfterSec = Math.max(1, Math.ceil((rl.resetAt - Date.now()) / 1000));
+      c.header('Retry-After', String(retryAfterSec));
+      return c.json(
+        {
+          error: 'Rate limit exceeded. Please retry shortly.',
+          code: 'RATE_LIMIT_EXCEEDED',
+          retryAfterSeconds: retryAfterSec,
+          requestId: c.get('requestId'),
+        },
+        429
+      );
+    }
+
+    return next();
+  });
+
   app.get('/', (c) => {
     return c.json({
-      service: c.env.SERVICE_NAME || 'autoblogger-ai-backend',
+      service: c.env.SERVICE_NAME || 'autoblogger-ai',
       status: 'online',
+      platform: 'cloudflare-workers',
       runtime: 'cloudflare-workers',
       healthEndpoint: '/health',
       apiBase: '/api/v1',
@@ -122,7 +160,7 @@ export function createApp(): Hono<{ Bindings: WorkerEnv; Variables: AppVariables
           ...(err.details ? { details: err.details } : {}),
           requestId,
         },
-        err.statusCode as 400 | 401 | 403 | 404 | 409 | 423 | 500 | 502 | 503
+        err.statusCode as 400 | 401 | 403 | 404 | 409 | 423 | 429 | 500 | 502 | 503
       );
     }
 

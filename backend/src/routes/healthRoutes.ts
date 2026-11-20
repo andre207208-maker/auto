@@ -23,8 +23,9 @@ healthRoutes.get('/health', async (c) => {
   return c.json(
     {
       status: 'ok',
-      service: c.env.SERVICE_NAME || 'autoblogger-ai-backend',
+      service: c.env.SERVICE_NAME || 'autoblogger-ai',
       version: '2.0.0',
+      platform: 'cloudflare-workers',
       runtime: 'cloudflare-workers',
       environment: c.env.ENVIRONMENT || 'production',
       timestamp: new Date().toISOString(),
@@ -44,7 +45,8 @@ healthRoutes.get('/api/v1/health/detailed', requireAuth, async (c) => {
 
   return c.json({
     status: 'ok',
-    service: c.env.SERVICE_NAME || 'autoblogger-ai-backend',
+    service: c.env.SERVICE_NAME || 'autoblogger-ai',
+    platform: 'cloudflare-workers',
     runtime: 'cloudflare-workers',
     timestamp: new Date().toISOString(),
     bindings: {
@@ -58,10 +60,12 @@ healthRoutes.get('/api/v1/health/detailed', requireAuth, async (c) => {
         c.env.SCHEDULER_SHARED_SECRET && c.env.SCHEDULER_SHARED_SECRET.length >= 16
       ),
       firebaseProjectId: Boolean(c.env.FIREBASE_PROJECT_ID),
-      gemini: Boolean(c.env.GEMINI_API_KEY),
-      openrouter: Boolean(c.env.OPENROUTER_API_KEY),
-      apinex: Boolean(c.env.APINEX_API_KEY),
-      customAi: Boolean(c.env.CUSTOM_AI_API_KEY && c.env.CUSTOM_AI_BASE_URL),
+      gemini: Boolean(c.env.GEMINI_API_KEYS || c.env.GEMINI_API_KEY),
+      openrouter: Boolean(c.env.OPENROUTER_API_KEYS || c.env.OPENROUTER_API_KEY),
+      apinex: Boolean(c.env.APINEX_API_KEYS || c.env.APINEX_API_KEY),
+      customAi: Boolean(
+        (c.env.CUSTOM_AI_API_KEYS || c.env.CUSTOM_AI_API_KEY) && c.env.CUSTOM_AI_BASE_URL
+      ),
       tavily: Boolean(c.env.TAVILY_API_KEY),
       googleOAuth: Boolean(
         c.env.GOOGLE_OAUTH_CLIENT_ID &&

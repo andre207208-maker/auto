@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { AppVariables, requireAuth } from '../middleware/auth.js';
 import {
+  analyzeArticleStructure,
   deleteAdConfig,
   getAdsterraDomains,
   getAdsterraPlacements,
@@ -20,11 +21,15 @@ const adConfigSchema = z.object({
   name: z.string().min(1).max(120),
   placementType: z.enum([
     'top_banner',
+    'in_article',
     'mid_article',
+    'between_sections',
+    'end_of_article',
     'bottom_banner',
     'social_bar',
     'native_banner',
   ]),
+  deviceTarget: z.enum(['all', 'desktop', 'mobile']).default('all'),
   scriptHtml: z.string().min(1).max(5000),
   enabled: z.boolean().default(true),
   insertAfterParagraph: z.number().int().min(1).max(50).optional(),
@@ -72,9 +77,16 @@ adsterraRoutes.delete('/configs/:id', async (c) => {
 });
 
 adsterraRoutes.post('/preview-inject', async (c) => {
-  const body = z.object({ html: z.string().min(1) }).parse(await c.req.json());
-  const html = await injectAdsIntoPostHtml(c.env, body.html);
-  return c.json({ html });
+  const body = z
+    .object({
+      html: z.string().min(1),
+      deviceTarget: z.enum(['all', 'desktop', 'mobile']).optional(),
+    })
+    .parse(await c.req.json());
+
+  const structure = analyzeArticleStructure(body.html);
+  const html = await injectAdsIntoPostHtml(c.env, body.html, body.deviceTarget);
+  return c.json({ html, structure });
 });
 
 export default adsterraRoutes;

@@ -32,14 +32,18 @@ export interface WorkerEnv {
   TAVILY_BASE_URL?: string;
   ADSTERRA_BASE_URL?: string;
 
-  // Cloudflare Secrets
+  // Cloudflare Secrets (Single or comma-separated multiple keys)
   BACKEND_API_SECRET?: string;
   SCHEDULER_SHARED_SECRET?: string;
   FIREBASE_PROJECT_ID?: string;
   GEMINI_API_KEY?: string;
+  GEMINI_API_KEYS?: string;
   OPENROUTER_API_KEY?: string;
+  OPENROUTER_API_KEYS?: string;
   APINEX_API_KEY?: string;
+  APINEX_API_KEYS?: string;
   CUSTOM_AI_API_KEY?: string;
+  CUSTOM_AI_API_KEYS?: string;
   CUSTOM_AI_BASE_URL?: string;
   CUSTOM_AI_MODEL?: string;
   TAVILY_API_KEY?: string;
@@ -77,7 +81,9 @@ export interface AIGenerationResponse {
   latencyMs: number;
   attempts: Array<{
     provider: AIProviderName;
+    keyIndex?: number;
     success: boolean;
+    rateLimited?: boolean;
     error?: string;
     latencyMs: number;
   }>;
@@ -86,9 +92,14 @@ export interface AIGenerationResponse {
 export interface AIProviderHealth {
   provider: AIProviderName;
   configured: boolean;
+  keyCount: number;
   healthy: boolean;
   consecutiveFailures: number;
   circuitOpenUntil: number | null;
+  totalRequests: number;
+  totalErrors: number;
+  rateLimitHits: number;
+  lastModelUsed?: string | null;
   lastError?: string | null;
   lastSuccessAt?: string | null;
   lastFailureAt?: string | null;
@@ -107,6 +118,7 @@ export interface ResearchTopicResult {
   primaryKeyword: string;
   secondaryKeywords: string[];
   searchIntent: 'informational' | 'commercial' | 'transactional' | 'navigational';
+  competitionAnalysis?: string;
   suggestedTitles: string[];
   outline: Array<{
     heading: string;
@@ -135,15 +147,23 @@ export interface GeneratedArticle {
 
 export interface SEOAuditResult {
   score: number;
+  passedQualityGate: boolean;
   titleLength: number;
   metaDescriptionLength: number;
   wordCount: number;
   keywordDensityPercent: number;
   h1Count: number;
   h2Count: number;
+  h3Count: number;
+  imageCount: number;
+  imagesMissingAlt: number;
+  internalLinkCount: number;
+  canonicalValid: boolean;
+  structuredDataValid: boolean;
   hasFaqSchema: boolean;
   issues: string[];
   recommendations: string[];
+  internalLinkSuggestions: Array<{ title: string; url: string }>;
   optimizedMetaTitle: string;
   optimizedMetaDescription: string;
   optimizedSlug: string;
@@ -159,6 +179,8 @@ export type TaskType =
   | 'GENERATE_ARTICLE'
   | 'SYNC_ANALYTICS_DAILY'
   | 'SYNC_ANALYTICS_WEEKLY'
+  | 'SEO_AUDIT_BATCH'
+  | 'CONTENT_UPDATE_CHECK'
   | 'SEND_NOTIFICATION'
   | 'INDEX_URL_CHECK';
 
@@ -240,10 +262,23 @@ export interface CampaignSchedule {
   updatedAt: string;
 }
 
+export type AdPlacementType =
+  | 'top_banner'
+  | 'in_article'
+  | 'mid_article'
+  | 'between_sections'
+  | 'end_of_article'
+  | 'bottom_banner'
+  | 'social_bar'
+  | 'native_banner';
+
+export type AdDeviceTarget = 'all' | 'desktop' | 'mobile';
+
 export interface AdsterraPlacementConfig {
   id: string;
   name: string;
-  placementType: 'top_banner' | 'mid_article' | 'bottom_banner' | 'social_bar' | 'native_banner';
+  placementType: AdPlacementType;
+  deviceTarget: AdDeviceTarget;
   scriptHtml: string;
   enabled: boolean;
   insertAfterParagraph?: number;

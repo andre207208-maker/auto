@@ -1,6 +1,8 @@
 import {
   AIProviderHealth,
   AIProviderName,
+  AdDeviceTarget,
+  AdPlacementType,
   AdsterraPlacementConfig,
   AgentControlState,
   AgentStatus,
@@ -80,6 +82,85 @@ export async function listRecentSystemLogs(
     details: r.details_json ? JSON.parse(r.details_json) : null,
     createdAt: r.created_at,
   }));
+}
+
+// ============================================================================
+// Dynamic App Settings & Edge Rate Limits
+// ============================================================================
+export async function getAppSetting<T>(db: D1Database, key: string): Promise<T | null> {
+  try {
+    const row = await db
+      .prepare(`SELECT value_json FROM app_settings WHERE key = ?`)
+      .bind(key)
+      .first<{ value_json: string }>();
+    return row ? (JSON.parse(row.value_json) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setAppSetting(
+  db: D1Database,
+  key: string,
+  value: unknown,
+  updatedBy: string
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO app_settings (key, value_json, updated_by, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value_json = excluded.value_json,
+         updated_by = excluded.updated_by,
+         updated_at = excluded.updated_at`
+    )
+    .bind(key, JSON.stringify(value), updatedBy, new Date().toISOString())
+    .run();
+}
+
+export async function checkAndIncrementRateLimit(
+  db: D1Database,
+  bucketKey: string,
+  maxRequests: number,
+  windowMs: number
+): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
+  const now = Date.now();
+  try {
+    const existing = await db
+      .prepare(`SELECT request_count, reset_at FROM rate_limits WHERE bucket_key = ?`)
+      .bind(bucketKey)
+      .first<{ request_count: number; reset_at: number }>();
+
+    if (!existing || existing.reset_at <= now) {
+      const resetAt = now + windowMs;
+      await db
+        .prepare(
+          `INSERT INTO rate_limits (bucket_key, request_count, reset_at)
+           VALUES (?, 1, ?)
+           ON CONFLICT(bucket_key) DO UPDATE SET
+             request_count = 1,
+             reset_at = excluded.reset_at`
+        )
+        .bind(bucketKey, resetAt)
+        .run();
+      return { allowed: true, remaining: Math.max(0, maxRequests - 1), resetAt };
+    }
+
+    const nextCount = existing.request_count + 1;
+    await db
+      .prepare(`UPDATE rate_limits SET request_count = ? WHERE bucket_key = ?`)
+      .bind(nextCount, bucketKey)
+      .run();
+
+    return {
+      allowed: nextCount <= maxRequests,
+      remaining: Math.max(0, maxRequests - nextCount),
+      resetAt: existing.reset_at,
+    };
+  } catch {
+    // Never block requests if rate_limits table has not yet migrated
+    return { allowed: true, remaining: maxRequests, resetAt: now + windowMs };
+  }
 }
 
 // ============================================================================
@@ -173,14 +254,15 @@ export async function cancelPendingTasksForEmergencyStop(
 }
 
 // ============================================================================
-// AI Provider Health Repository
+// AI Provider Health & Usage Repository
 // ============================================================================
 export async function listProviderHealthRows(
   db: D1Database
-): Promise<Record<string, AIProviderHealth>> {
+): Promise<Record<string, Partial<AIProviderHealth>>> {
   const res = await db
     .prepare(
       `SELECT provider, configured, healthy, consecutive_failures, circuit_open_until,
+              total_requests, total_errors, rate_limit_hits, last_model_used,
               last_error, last_success_at, last_failure_at, average_latency_ms
        FROM ai_provider_health`
     )
@@ -190,13 +272,17 @@ export async function listProviderHealthRows(
       healthy: number;
       consecutive_failures: number;
       circuit_open_until: number | null;
+      total_requests: number;
+      total_errors: number;
+      rate_limit_hits: number;
+      last_model_used: string | null;
       last_error: string | null;
       last_success_at: string | null;
       last_failure_at: string | null;
       average_latency_ms: number | null;
     }>();
 
-  const map: Record<string, AIProviderHealth> = {};
+  const map: Record<string, Partial<AIProviderHealth>> = {};
   for (const r of res.results) {
     map[r.provider] = {
       provider: r.provider,
@@ -204,6 +290,10 @@ export async function listProviderHealthRows(
       healthy: r.healthy === 1,
       consecutiveFailures: r.consecutive_failures,
       circuitOpenUntil: r.circuit_open_until,
+      totalRequests: r.total_requests ?? 0,
+      totalErrors: r.total_errors ?? 0,
+      rateLimitHits: r.rate_limit_hits ?? 0,
+      lastModelUsed: r.last_model_used,
       lastError: r.last_error,
       lastSuccessAt: r.last_success_at,
       lastFailureAt: r.last_failure_at,
@@ -221,13 +311,18 @@ export async function upsertProviderHealthRow(
     .prepare(
       `INSERT INTO ai_provider_health (
          provider, configured, healthy, consecutive_failures, circuit_open_until,
+         total_requests, total_errors, rate_limit_hits, last_model_used,
          last_error, last_success_at, last_failure_at, average_latency_ms, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(provider) DO UPDATE SET
          configured = excluded.configured,
          healthy = excluded.healthy,
          consecutive_failures = excluded.consecutive_failures,
          circuit_open_until = excluded.circuit_open_until,
+         total_requests = excluded.total_requests,
+         total_errors = excluded.total_errors,
+         rate_limit_hits = excluded.rate_limit_hits,
+         last_model_used = excluded.last_model_used,
          last_error = excluded.last_error,
          last_success_at = excluded.last_success_at,
          last_failure_at = excluded.last_failure_at,
@@ -240,6 +335,10 @@ export async function upsertProviderHealthRow(
       health.healthy ? 1 : 0,
       health.consecutiveFailures,
       health.circuitOpenUntil,
+      health.totalRequests,
+      health.totalErrors,
+      health.rateLimitHits,
+      health.lastModelUsed ?? null,
       health.lastError ?? null,
       health.lastSuccessAt ?? null,
       health.lastFailureAt ?? null,
@@ -575,7 +674,7 @@ export async function updatePipelineRun(
 }
 
 // ============================================================================
-// Campaigns, Posts, Adsterra, Notifications, Analytics Snapshots
+// Campaigns & Posts (including Duplicate Detection & Internal Links)
 // ============================================================================
 export async function listCampaignRows(
   db: D1Database,
@@ -696,6 +795,49 @@ export async function updateCampaignQuotaRow(
     .run();
 }
 
+export async function findDuplicatePost(
+  db: D1Database,
+  params: { slug?: string; contentHash?: string; primaryKeyword?: string; blogId?: string }
+): Promise<{ id: string; title: string; bloggerUrl: string } | null> {
+  if (params.contentHash) {
+    const byHash = await db
+      .prepare(`SELECT id, title, blogger_url FROM posts WHERE content_hash = ? LIMIT 1`)
+      .bind(params.contentHash)
+      .first<{ id: string; title: string; blogger_url: string }>();
+    if (byHash) {
+      return { id: byHash.id, title: byHash.title, bloggerUrl: byHash.blogger_url };
+    }
+  }
+
+  if (params.slug && params.blogId) {
+    const bySlug = await db
+      .prepare(`SELECT id, title, blogger_url FROM posts WHERE slug = ? AND blog_id = ? LIMIT 1`)
+      .bind(params.slug, params.blogId)
+      .first<{ id: string; title: string; blogger_url: string }>();
+    if (bySlug) {
+      return { id: bySlug.id, title: bySlug.title, bloggerUrl: bySlug.blogger_url };
+    }
+  }
+
+  return null;
+}
+
+export async function listRecentInternalLinkTargets(
+  db: D1Database,
+  blogId?: string,
+  limit = 8
+): Promise<Array<{ title: string; url: string; primaryKeyword: string }>> {
+  const sql = blogId
+    ? `SELECT title, blogger_url, primary_keyword FROM posts WHERE blog_id = ? AND is_draft = 0 ORDER BY published_at DESC LIMIT ?`
+    : `SELECT title, blogger_url, primary_keyword FROM posts WHERE is_draft = 0 ORDER BY published_at DESC LIMIT ?`;
+
+  const stmt = blogId ? db.prepare(sql).bind(blogId, limit) : db.prepare(sql).bind(limit);
+  const res = await stmt.all<{ title: string; blogger_url: string; primary_keyword: string }>();
+  return res.results
+    .filter((r) => Boolean(r.blogger_url))
+    .map((r) => ({ title: r.title, url: r.blogger_url, primaryKeyword: r.primary_keyword }));
+}
+
 export async function insertPostRecord(
   db: D1Database,
   post: {
@@ -707,6 +849,8 @@ export async function insertPostRecord(
     bloggerUrl: string;
     title: string;
     slug: string;
+    contentHash?: string | null;
+    canonicalUrl?: string | null;
     metaDescription: string;
     primaryKeyword: string;
     secondaryKeywords: string[];
@@ -725,10 +869,10 @@ export async function insertPostRecord(
     .prepare(
       `INSERT INTO posts (
          id, pipeline_id, campaign_id, blog_id, blogger_post_id, blogger_url,
-         title, slug, meta_description, primary_keyword, secondary_keywords_json,
-         labels_json, word_count, seo_score, provider_used, model_used,
-         is_draft, r2_asset_key, triggered_by, published_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         title, slug, content_hash, canonical_url, meta_description, primary_keyword,
+         secondary_keywords_json, labels_json, word_count, seo_score, provider_used,
+         model_used, is_draft, r2_asset_key, last_audited_at, triggered_by, published_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       post.id,
@@ -739,6 +883,8 @@ export async function insertPostRecord(
       post.bloggerUrl,
       post.title,
       post.slug,
+      post.contentHash ?? null,
+      post.canonicalUrl ?? post.bloggerUrl,
       post.metaDescription,
       post.primaryKeyword,
       JSON.stringify(post.secondaryKeywords),
@@ -749,6 +895,7 @@ export async function insertPostRecord(
       post.modelUsed,
       post.isDraft ? 1 : 0,
       post.r2AssetKey ?? null,
+      post.publishedAt,
       post.triggeredBy,
       post.publishedAt
     )
@@ -767,13 +914,17 @@ export async function listPostRecords(
   return res.results;
 }
 
+// ============================================================================
+// Adsterra Configurations Repository
+// ============================================================================
 export async function listAdConfigRows(db: D1Database): Promise<AdsterraPlacementConfig[]> {
   const res = await db
     .prepare(`SELECT * FROM ad_configs ORDER BY updated_at DESC`)
     .all<{
       id: string;
       name: string;
-      placement_type: AdsterraPlacementConfig['placementType'];
+      placement_type: AdPlacementType;
+      device_target: AdDeviceTarget | null;
       script_html: string;
       enabled: number;
       insert_after_paragraph: number | null;
@@ -784,6 +935,7 @@ export async function listAdConfigRows(db: D1Database): Promise<AdsterraPlacemen
     id: r.id,
     name: r.name,
     placementType: r.placement_type,
+    deviceTarget: r.device_target || 'all',
     scriptHtml: r.script_html,
     enabled: r.enabled === 1,
     insertAfterParagraph: r.insert_after_paragraph ?? undefined,
@@ -797,11 +949,12 @@ export async function upsertAdConfigRow(
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO ad_configs (id, name, placement_type, script_html, enabled, insert_after_paragraph, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO ad_configs (id, name, placement_type, device_target, script_html, enabled, insert_after_paragraph, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          placement_type = excluded.placement_type,
+         device_target = excluded.device_target,
          script_html = excluded.script_html,
          enabled = excluded.enabled,
          insert_after_paragraph = excluded.insert_after_paragraph,
@@ -811,6 +964,7 @@ export async function upsertAdConfigRow(
       cfg.id,
       cfg.name,
       cfg.placementType,
+      cfg.deviceTarget || 'all',
       cfg.scriptHtml,
       cfg.enabled ? 1 : 0,
       cfg.insertAfterParagraph ?? null,

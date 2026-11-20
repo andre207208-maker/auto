@@ -9,6 +9,7 @@ import {
   submitSitemap,
 } from '../services/searchConsoleService.js';
 import { WorkerEnv } from '../types/index.js';
+import { analyzePeriodPerformance } from '../workers/analyticsWorker.js';
 
 const analyticsRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
 analyticsRoutes.use('*', requireAuth);
@@ -46,7 +47,10 @@ analyticsRoutes.post('/gsc/sitemaps/submit', async (c) => {
     .object({ feedpath: z.string().url(), siteUrl: z.string().optional() })
     .parse(await c.req.json());
   const result = await submitSitemap(c.env, body.feedpath, body.siteUrl);
-  return c.json(result);
+  return c.json({
+    ...result,
+    note: 'Sitemap submitted to Google Search Console. Submission notifies Googlebot of URLs and does not guarantee immediate indexing; verify status via /gsc/inspect.',
+  });
 });
 
 analyticsRoutes.post('/gsc/inspect', async (c) => {
@@ -69,6 +73,17 @@ analyticsRoutes.get('/ga4/top-pages', async (c) => {
   const propertyId = c.req.query('propertyId');
   const data = await getGA4TopPages(c.env, { propertyId, startDate, endDate });
   return c.json(data as Record<string, unknown>);
+});
+
+analyticsRoutes.get('/insights', async (c) => {
+  const daysParam = Number(c.req.query('days') || '7');
+  const days = Math.min(Math.max(1, Number.isFinite(daysParam) ? daysParam : 7), 30);
+  const analysis = await analyzePeriodPerformance(c.env, days);
+  return c.json({
+    periodDays: days,
+    ...analysis.insights,
+    errors: analysis.errors,
+  });
 });
 
 analyticsRoutes.get('/snapshots', async (c) => {

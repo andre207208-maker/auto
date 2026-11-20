@@ -1,10 +1,11 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import workerEntry from '../src/index.js';
 import { QueueTaskMessage, WorkerEnv } from '../src/types/index.js';
 
 /**
- * Lightweight in-memory D1 mock supporting prepared statements and state transitions
- * needed to test Worker HTTP routes, Queues, Cron handlers, and AI failover locally.
+ * In-memory D1 mock supporting all 14 tables & prepared statements
+ * needed to test Worker HTTP routes, Queues, Cron handlers, multi-key AI failover,
+ * SEO quality gates, Adsterra injection, rate limiting, and analytics insights locally.
  */
 function createMockD1(): D1Database {
   const agentState: {
@@ -24,9 +25,15 @@ function createMockD1(): D1Database {
   };
 
   const tasks = new Map<string, Record<string, unknown>>();
+  const pipelines = new Map<string, Record<string, unknown>>();
+  const posts = new Map<string, Record<string, unknown>>();
   const providerHealth = new Map<string, Record<string, unknown>>();
   const campaigns = new Map<string, Record<string, unknown>>();
+  const adConfigs = new Map<string, Record<string, unknown>>();
+  const appSettings = new Map<string, Record<string, unknown>>();
+  const rateLimits = new Map<string, { request_count: number; reset_at: number }>();
   const oauthTokens = new Map<string, Record<string, unknown>>();
+  const analyticsSnapshots = new Map<string, Record<string, unknown>>();
   const systemLogs: Array<Record<string, unknown>> = [];
   const notifications: Array<Record<string, unknown>> = [];
 
@@ -40,6 +47,14 @@ function createMockD1(): D1Database {
       if (normalized.includes('FROM agent_state WHERE id =')) {
         return { ...agentState } as T;
       }
+      if (normalized.includes('FROM app_settings WHERE key =')) {
+        const row = appSettings.get(args[0] as string);
+        return row ? ({ ...row } as T) : null;
+      }
+      if (normalized.includes('FROM rate_limits WHERE bucket_key =')) {
+        const row = rateLimits.get(args[0] as string);
+        return row ? ({ ...row } as T) : null;
+      }
       if (normalized.includes('FROM task_queue WHERE idempotency_key =')) {
         const key = args[0] as string;
         for (const t of tasks.values()) {
@@ -52,6 +67,29 @@ function createMockD1(): D1Database {
       if (normalized.includes('FROM task_queue WHERE id =')) {
         const row = tasks.get(args[0] as string);
         return row ? ({ ...row } as T) : null;
+      }
+      if (normalized.includes('FROM pipeline_runs WHERE id =')) {
+        const row = pipelines.get(args[0] as string);
+        return row ? ({ ...row } as T) : null;
+      }
+      if (normalized.includes('FROM posts WHERE content_hash =')) {
+        for (const p of posts.values()) {
+          if (p.content_hash === args[0]) {
+            return { ...p } as T;
+          }
+        }
+        return null;
+      }
+      if (normalized.includes('FROM posts WHERE slug = ? AND blog_id =')) {
+        for (const p of posts.values()) {
+          if (p.slug === args[0] && p.blog_id === args[1]) {
+            return { ...p } as T;
+          }
+        }
+        return null;
+      }
+      if (normalized.includes('SELECT COUNT(*) AS cnt FROM posts')) {
+        return { cnt: posts.size } as T;
       }
       if (normalized.includes('FROM oauth_tokens WHERE provider =')) {
         const row = oauthTokens.get(args[0] as string);
@@ -68,6 +106,12 @@ function createMockD1(): D1Database {
         results = Array.from(tasks.values());
       } else if (normalized.includes('FROM campaigns')) {
         results = Array.from(campaigns.values());
+      } else if (normalized.includes('FROM ad_configs')) {
+        results = Array.from(adConfigs.values());
+      } else if (normalized.includes('FROM posts')) {
+        results = Array.from(posts.values());
+      } else if (normalized.includes('FROM analytics_snapshots')) {
+        results = Array.from(analyticsSnapshots.values());
       } else if (normalized.includes('FROM system_logs')) {
         results = [...systemLogs];
       } else if (normalized.includes('FROM device_tokens')) {
@@ -78,14 +122,42 @@ function createMockD1(): D1Database {
       return {
         results: results as T[],
         success: true,
-        meta: { duration: 1, changes: 0, last_row_id: 0, changed_db: false, size_after: 0, rows_read: results.length, rows_written: 0 },
+        meta: {
+          duration: 1,
+          changes: 0,
+          last_row_id: 0,
+          changed_db: false,
+          size_after: 0,
+          rows_read: results.length,
+          rows_written: 0,
+        },
       };
     };
 
     const execRun = async (): Promise<D1Result> => {
       let changes = 0;
 
-      if (normalized.startsWith('INSERT INTO agent_state')) {
+      if (normalized.startsWith('INSERT INTO app_settings')) {
+        appSettings.set(args[0] as string, {
+          key: args[0],
+          value_json: args[1],
+          updated_by: args[2],
+          updated_at: args[3],
+        });
+        changes = 1;
+      } else if (normalized.startsWith('INSERT INTO rate_limits')) {
+        rateLimits.set(args[0] as string, {
+          request_count: 1,
+          reset_at: args[1] as number,
+        });
+        changes = 1;
+      } else if (normalized.startsWith('UPDATE rate_limits SET request_count =')) {
+        const bucket = rateLimits.get(args[1] as string);
+        if (bucket) {
+          bucket.request_count = args[0] as number;
+          changes = 1;
+        }
+      } else if (normalized.startsWith('INSERT INTO agent_state')) {
         agentState.status = args[0] as string;
         agentState.emergency_stop = args[1] as number;
         agentState.reason = (args[2] as string | null) ?? null;
@@ -99,11 +171,15 @@ function createMockD1(): D1Database {
           healthy: args[2],
           consecutive_failures: args[3],
           circuit_open_until: args[4],
-          last_error: args[5],
-          last_success_at: args[6],
-          last_failure_at: args[7],
-          average_latency_ms: args[8],
-          updated_at: args[9],
+          total_requests: args[5],
+          total_errors: args[6],
+          rate_limit_hits: args[7],
+          last_model_used: args[8],
+          last_error: args[9],
+          last_success_at: args[10],
+          last_failure_at: args[11],
+          average_latency_ms: args[12],
+          updated_at: args[13],
         });
         changes = 1;
       } else if (normalized.startsWith('INSERT INTO task_queue')) {
@@ -154,6 +230,96 @@ function createMockD1(): D1Database {
             changes += 1;
           }
         }
+      } else if (normalized.startsWith('INSERT INTO pipeline_runs')) {
+        pipelines.set(args[0] as string, {
+          id: args[0],
+          campaign_id: args[1],
+          stage: args[2],
+          niche: args[3],
+          seed_keyword: args[4],
+          blog_id: args[5],
+          language: args[6],
+          tone: args[7],
+          publish_as_draft: args[8],
+          inject_ads: args[9],
+          preferred_provider: args[10],
+          triggered_by: args[11],
+          created_at: args[12],
+          updated_at: args[13],
+          research_json: null,
+          article_json: null,
+          seo_json: null,
+          result_json: null,
+          error_message: null,
+          completed_at: null,
+        });
+        changes = 1;
+      } else if (normalized.startsWith('UPDATE pipeline_runs')) {
+        const row = pipelines.get(args[8] as string);
+        if (row) {
+          row.stage = args[0];
+          if (args[1] !== null) row.research_json = args[1];
+          if (args[2] !== null) row.article_json = args[2];
+          if (args[3] !== null) row.seo_json = args[3];
+          if (args[4] !== null) row.result_json = args[4];
+          row.error_message = args[5];
+          if (args[6] !== null) row.completed_at = args[6];
+          row.updated_at = args[7];
+          changes = 1;
+        }
+      } else if (normalized.startsWith('INSERT INTO posts')) {
+        posts.set(args[0] as string, {
+          id: args[0],
+          pipeline_id: args[1],
+          campaign_id: args[2],
+          blog_id: args[3],
+          blogger_post_id: args[4],
+          blogger_url: args[5],
+          title: args[6],
+          slug: args[7],
+          content_hash: args[8],
+          canonical_url: args[9],
+          meta_description: args[10],
+          primary_keyword: args[11],
+          secondary_keywords_json: args[12],
+          labels_json: args[13],
+          word_count: args[14],
+          seo_score: args[15],
+          provider_used: args[16],
+          model_used: args[17],
+          is_draft: args[18],
+          r2_asset_key: args[19],
+          last_audited_at: args[20],
+          triggered_by: args[21],
+          published_at: args[22],
+        });
+        changes = 1;
+      } else if (normalized.startsWith('INSERT INTO ad_configs')) {
+        adConfigs.set(args[0] as string, {
+          id: args[0],
+          name: args[1],
+          placement_type: args[2],
+          device_target: args[3],
+          script_html: args[4],
+          enabled: args[5],
+          insert_after_paragraph: args[6],
+          updated_at: args[7],
+        });
+        changes = 1;
+      } else if (normalized.startsWith('DELETE FROM ad_configs')) {
+        changes = adConfigs.delete(args[0] as string) ? 1 : 0;
+      } else if (normalized.startsWith('INSERT INTO analytics_snapshots')) {
+        analyticsSnapshots.set(args[0] as string, {
+          id: args[0],
+          period: args[1],
+          start_date: args[2],
+          end_date: args[3],
+          published_posts_count: args[4],
+          sources_json: args[5],
+          errors_json: args[6],
+          generated_at: args[7],
+        });
+        changes = 1;
       } else if (normalized.startsWith('INSERT INTO oauth_tokens')) {
         oauthTokens.set('google_oauth', {
           provider: 'google_oauth',
@@ -173,7 +339,15 @@ function createMockD1(): D1Database {
       return {
         results: [],
         success: true,
-        meta: { duration: 1, changes, last_row_id: 0, changed_db: changes > 0, size_after: 0, rows_read: 0, rows_written: changes },
+        meta: {
+          duration: 1,
+          changes,
+          last_row_id: 0,
+          changed_db: changes > 0,
+          size_after: 0,
+          rows_read: 0,
+          rows_written: changes,
+        },
       };
     };
 
@@ -210,7 +384,7 @@ function createTestEnv(overrides: Partial<WorkerEnv> = {}): {
       },
       sendBatch: async () => {},
     } as unknown as Queue<QueueTaskMessage>,
-    SERVICE_NAME: 'autoblogger-ai-backend',
+    SERVICE_NAME: 'autoblogger-ai',
     ENVIRONMENT: 'test',
     ALLOW_API_KEY_AUTH: 'true',
     BACKEND_API_SECRET: 'test-super-secret-api-key-123456',
@@ -241,14 +415,15 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     pendingWaitUntil.length = 0;
   });
 
-  it('GET /health returns 200 OK with valid Android verification payload', async () => {
+  it('GET /health returns 200 OK with platform: cloudflare-workers for Android verification', async () => {
     const { env } = createTestEnv();
     const res = await workerEntry.fetch(new Request('https://worker.example/health'), env, dummyCtx);
     expect(res.status).toBe(200);
 
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.status).toBe('ok');
-    expect(body.service).toBe('autoblogger-ai-backend');
+    expect(body.service).toBe('autoblogger-ai');
+    expect(body.platform).toBe('cloudflare-workers');
     expect(body.runtime).toBe('cloudflare-workers');
     expect(body.dbConnected).toBe(true);
     expect(body.queueConfigured).toBe(true);
@@ -279,7 +454,6 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
   it('supports pause, resume, and emergency stop cancelling pending tasks', async () => {
     const { env } = createTestEnv();
 
-    // Enqueue a task first
     const enqueueRes = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/tasks/enqueue', {
         method: 'POST',
@@ -298,7 +472,6 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     );
     expect(enqueueRes.status).toBe(202);
 
-    // Duplicate idempotency key should deduplicate
     const dupRes = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/tasks/enqueue', {
         method: 'POST',
@@ -319,7 +492,6 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     const dupBody = (await dupRes.json()) as { duplicate: boolean };
     expect(dupBody.duplicate).toBe(true);
 
-    // Trigger emergency stop
     const stopRes = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/agent/emergency-stop', {
         method: 'POST',
@@ -342,12 +514,31 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     expect(stopBody.cancelledTasks).toBe(1);
   });
 
-  it('automatically fails over from Gemini to OpenRouter on upstream failure', async () => {
-    const { env } = createTestEnv();
+  it('rotates multiple API keys per provider and fails over on rate-limit / quota exhaustion', async () => {
+    const { env } = createTestEnv({
+      GEMINI_API_KEYS: 'gem-key-1,gem-key-2',
+      GEMINI_API_KEY: undefined,
+    });
+
+    // Update manual provider priority first
+    const priorityRes = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/ai/providers/priority', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'test-super-secret-api-key-123456',
+        },
+        body: JSON.stringify({ order: ['gemini', 'openrouter'] }),
+      }),
+      env,
+      dummyCtx
+    );
+    expect(priorityRes.status).toBe(200);
 
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response('Gemini rate limit', { status: 429 }))
+      .mockResolvedValueOnce(new Response('Quota exhausted RESOURCE_EXHAUSTED', { status: 429 }))
+      .mockResolvedValueOnce(new Response('Second key rate limited', { status: 429 }))
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -374,31 +565,34 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     const data = (await res.json()) as {
       provider: string;
       text: string;
-      attempts: Array<{ provider: string; success: boolean }>;
+      attempts: Array<{ provider: string; keyIndex?: number; success: boolean; rateLimited?: boolean }>;
     };
     expect(data.provider).toBe('openrouter');
     expect(data.text).toBe('Fallback response from OpenRouter');
-    expect(data.attempts).toHaveLength(2);
-    expect(data.attempts[0]).toMatchObject({ provider: 'gemini', success: false });
-    expect(data.attempts[1]).toMatchObject({ provider: 'openrouter', success: true });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(data.attempts).toHaveLength(3);
+    expect(data.attempts[0]).toMatchObject({ provider: 'gemini', keyIndex: 0, success: false, rateLimited: true });
+    expect(data.attempts[1]).toMatchObject({ provider: 'gemini', keyIndex: 1, success: false, rateLimited: true });
+    expect(data.attempts[2]).toMatchObject({ provider: 'openrouter', keyIndex: 0, success: true });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('processes Cloudflare Queue batch messages and Cron Triggers', async () => {
+  it('processes Cloudflare Queue batch messages and Cron Triggers including weekly SEO & content checks', async () => {
     const { env, sentQueueMessages } = createTestEnv();
 
-    // Daily cron trigger should enqueue SYNC_ANALYTICS_DAILY
     await workerEntry.scheduled(
-      { cron: '50 23 * * *', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
+      { cron: '55 23 * * 0', scheduledTime: Date.now(), noRetry: () => {} } as ScheduledController,
       env,
       dummyCtx
     );
     await Promise.all(pendingWaitUntil);
 
-    expect(sentQueueMessages).toHaveLength(1);
-    expect(sentQueueMessages[0].type).toBe('SYNC_ANALYTICS_DAILY');
+    expect(sentQueueMessages).toHaveLength(3);
+    expect(sentQueueMessages.map((m) => m.type)).toEqual([
+      'SYNC_ANALYTICS_WEEKLY',
+      'SEO_AUDIT_BATCH',
+      'CONTENT_UPDATE_CHECK',
+    ]);
 
-    // Enqueue a SEND_NOTIFICATION task and process via queue consumer
     const enq = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/tasks/enqueue', {
         method: 'POST',
@@ -446,54 +640,11 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
     expect(acked).toBe(true);
   });
 
-  it('executes Blogger OAuth token refresh and post publishing contract', async () => {
+  it('enforces SEO quality gate, alt text validation, and Adsterra device/density placement', async () => {
     const { env } = createTestEnv();
 
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ access_token: 'mock-access-token', expires_in: 3600 }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            id: 'post-99',
-            url: 'https://example.blogspot.com/2026/11/test.html',
-            title: 'Test Post',
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
-      );
-
-    const res = await workerEntry.fetch(
-      new Request('https://worker.example/api/v1/blogger/posts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': 'test-super-secret-api-key-123456',
-        },
-        body: JSON.stringify({
-          title: 'Test Post',
-          content: '<p>Hello Blogger</p>',
-          labels: ['Tech'],
-        }),
-      }),
-      env,
-      dummyCtx
-    );
-
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { post: { id: string; url: string } };
-    expect(body.post.id).toBe('post-99');
-    expect(body.post.url).toContain('blogspot.com');
-  });
-
-  it('audits SEO and runs Tavily-grounded research endpoint', async () => {
-    const { env } = createTestEnv({ TAVILY_API_KEY: 'test-tavily-key' });
-
-    const seoRes = await workerEntry.fetch(
+    // Flag missing image alt text & placeholder text
+    const badSeoRes = await workerEntry.fetch(
       new Request('https://worker.example/api/v1/seo/audit', {
         method: 'POST',
         headers: {
@@ -501,76 +652,115 @@ describe('AUTOBLOGGER AI Cloudflare Worker', () => {
           'X-API-Key': 'test-super-secret-api-key-123456',
         },
         body: JSON.stringify({
-          title: 'Cloudflare Workers Guide for Beginners',
-          metaDescription:
-            'Learn how to build serverless APIs with Cloudflare Workers, D1 database, and Queues in this complete step-by-step developer guide.',
-          htmlContent:
-            '<p>Cloudflare Workers lets you deploy serverless functions globally.</p><h2>Why Cloudflare Workers</h2><p>Fast edge execution with Cloudflare Workers.</p>',
-          primaryKeyword: 'Cloudflare Workers',
+          title: 'Short',
+          metaDescription: 'Too short',
+          htmlContent: '<p>Lorem ipsum dolor sit amet</p><img src="https://example.com/a.jpg" />',
+          primaryKeyword: 'Cloudflare',
+          minQualityWordCount: 50,
         }),
       }),
       env,
       dummyCtx
     );
-    expect(seoRes.status).toBe(200);
-    const seoBody = (await seoRes.json()) as { audit: { score: number; h2Count: number } };
-    expect(seoBody.audit.h2Count).toBe(1);
-    expect(seoBody.audit.score).toBeGreaterThan(50);
+    expect(badSeoRes.status).toBe(200);
+    const badAudit = (await badSeoRes.json()) as {
+      audit: { passedQualityGate: boolean; imagesMissingAlt: number };
+    };
+    expect(badAudit.audit.passedQualityGate).toBe(false);
+    expect(badAudit.audit.imagesMissingAlt).toBe(1);
 
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            results: [{ title: 'CF Docs', url: 'https://developers.cloudflare.com', content: 'Workers overview' }],
-          }),
-          { status: 200 }
-        )
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    {
-                      text: JSON.stringify({
-                        niche: 'Serverless',
-                        primaryKeyword: 'Cloudflare Workers',
-                        secondaryKeywords: ['D1', 'Queues'],
-                        searchIntent: 'informational',
-                        suggestedTitles: ['Cloudflare Workers Complete Guide'],
-                        outline: [{ heading: 'Intro', subheadings: ['Overview'], keyPoints: ['Edge'] }],
-                        faqQuestions: ['Is Cloudflare Workers free?'],
-                        estimatedDifficulty: 'medium',
-                      }),
-                    },
-                  ],
-                },
-              },
-            ],
-          }),
-          { status: 200 }
-        )
-      );
-
-    const res = await workerEntry.fetch(
-      new Request('https://worker.example/api/v1/content/research', {
+    // Save desktop-targeted between_sections ad config and preview injection
+    const adSave = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/adsterra/configs', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': 'test-super-secret-api-key-123456',
         },
-        body: JSON.stringify({ niche: 'Serverless', seedKeyword: 'Cloudflare Workers' }),
+        body: JSON.stringify({
+          id: 'slot-sec-1',
+          name: 'Desktop Section Ad',
+          placementType: 'between_sections',
+          deviceTarget: 'desktop',
+          scriptHtml: '<!-- adsterra-section -->',
+          enabled: true,
+        }),
       }),
       env,
       dummyCtx
     );
-    expect(res.status).toBe(200);
-    const researchBody = (await res.json()) as {
-      research: { primaryKeyword: string; tavilySources: Array<{ title: string }> };
+    expect(adSave.status).toBe(201);
+
+    const preview = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/adsterra/preview-inject', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'test-super-secret-api-key-123456',
+        },
+        body: JSON.stringify({
+          html: '<p>Intro paragraph</p><h2>Section 1</h2><p>Body</p><h2>Section 2</h2><p>More body</p>',
+          deviceTarget: 'desktop',
+        }),
+      }),
+      env,
+      dummyCtx
+    );
+    expect(preview.status).toBe(200);
+    const previewJson = (await preview.json()) as {
+      html: string;
+      structure: { headingCount: number; maxRecommendedAds: number };
     };
-    expect(researchBody.research.primaryKeyword).toBe('Cloudflare Workers');
-    expect(researchBody.research.tavilySources[0].title).toBe('CF Docs');
+    expect(previewJson.structure.headingCount).toBe(2);
+    expect(previewJson.html).toContain('data-device-target="desktop"');
+    expect(previewJson.html).toContain('<!-- adsterra-section -->');
+  });
+
+  it('computes period-over-period traffic drop insights via GA4 & Search Console', async () => {
+    const { env } = createTestEnv({
+      GA4_PROPERTY_ID: '123456',
+      GSC_SITE_URL: 'https://example.blogspot.com/',
+    });
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'mock-token', expires_in: 3600 }), {
+          status: 200,
+        });
+      }
+      if (url.includes('analyticsdata.googleapis.com')) {
+        const body = JSON.stringify({
+          rows: [{ metricValues: [{ value: '500' }, { value: '300' }, { value: '250' }] }],
+        });
+        return new Response(body, { status: 200 });
+      }
+      if (url.includes('searchAnalytics/query')) {
+        return new Response(
+          JSON.stringify({
+            rows: [
+              { keys: ['https://example.blogspot.com/post-a'], clicks: 12, impressions: 200 },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response('{}', { status: 200 });
+    });
+
+    const insightsRes = await workerEntry.fetch(
+      new Request('https://worker.example/api/v1/analytics/insights?days=7', {
+        headers: { 'X-API-Key': 'test-super-secret-api-key-123456' },
+      }),
+      env,
+      dummyCtx
+    );
+    expect(insightsRes.status).toBe(200);
+    const insights = (await insightsRes.json()) as {
+      periodDays: number;
+      recommendations: string[];
+    };
+    expect(insights.periodDays).toBe(7);
+    expect(insights.recommendations.length).toBeGreaterThan(0);
   });
 });

@@ -19,6 +19,7 @@ data class BackendVerificationResult(
     val normalizedBaseUrl: String,
     val statusCode: Int? = null,
     val serviceName: String? = null,
+    val platform: String? = null,
     val runtime: String? = null,
     val timestamp: String? = null,
     val agentStatus: String? = null,
@@ -77,7 +78,8 @@ object CloudRunHealthVerifier {
                 val json = JSONObject(body)
                 val status = json.optString("status", "")
                 val service = json.optString("service", "")
-                val runtime = json.optString("runtime", "cloudflare-workers")
+                val platform = json.optString("platform", json.optString("runtime", "cloudflare-workers"))
+                val runtime = json.optString("runtime", platform)
                 val timestamp = json.optString("timestamp", "")
                 val agentStatus = json.optString("agentStatus", "unknown")
                 val dbConnected = if (json.has("dbConnected")) {
@@ -101,6 +103,7 @@ object CloudRunHealthVerifier {
                     normalizedBaseUrl = baseUrl,
                     statusCode = code,
                     serviceName = service,
+                    platform = platform,
                     runtime = runtime,
                     timestamp = timestamp,
                     agentStatus = agentStatus,

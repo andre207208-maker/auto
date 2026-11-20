@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getPipelineRunById, listPostRecords } from '../db/repositories.js';
 import { AppVariables, requireAuth } from '../middleware/auth.js';
-import { researchTopic } from '../services/researchService.js';
+import { discoverTrendingTopics, researchTopic } from '../services/researchService.js';
 import { enqueueTask } from '../services/taskQueueService.js';
 import { WorkerEnv } from '../types/index.js';
 import { AppError } from '../utils/errors.js';
@@ -10,6 +10,13 @@ import { startAutonomousPipeline } from '../workers/publishWorker.js';
 
 const contentRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
 contentRoutes.use('*', requireAuth);
+
+const trendingSchema = z.object({
+  niche: z.string().min(2).max(200),
+  language: z.string().max(60).optional(),
+  count: z.number().int().min(1).max(10).optional(),
+  preferredProvider: z.enum(['gemini', 'openrouter', 'apinex', 'custom']).optional(),
+});
 
 const researchSchema = z.object({
   niche: z.string().min(2).max(200),
@@ -40,6 +47,12 @@ const pipelineSchema = z.object({
   injectAds: z.boolean().optional(),
   preferredProvider: z.enum(['gemini', 'openrouter', 'apinex', 'custom']).optional(),
   idempotencyKey: z.string().max(120).optional(),
+});
+
+contentRoutes.post('/discover-trending', async (c) => {
+  const input = trendingSchema.parse(await c.req.json());
+  const discovery = await discoverTrendingTopics(c.env, input);
+  return c.json(discovery);
 });
 
 contentRoutes.post('/research', async (c) => {

@@ -21,6 +21,7 @@ interface HealthResponse {
   status?: string;
   service?: string;
   version?: string;
+  platform?: string;
   runtime?: string;
   environment?: string;
   timestamp?: string;
@@ -33,20 +34,20 @@ interface HealthResponse {
 const CAPABILITIES = [
   { id: '01', name: 'Workers Fetch + GET /health', module: 'index.ts / healthRoutes.ts', desc: 'Zero-cold-start Edge Worker handler & Android Setup Wizard /health verification' },
   { id: '02', name: 'WebCrypto Auth & API Key', module: 'middleware/auth.ts', desc: 'Firebase JWT JWKS verify via crypto.subtle + timing-safe X-API-Key & Scheduler secret' },
-  { id: '03', name: 'Cloudflare D1 Persistence', module: 'db/repositories.ts', desc: '12 relational SQLite tables via DB binding & SQL migrations (0001_initial_schema.sql)' },
-  { id: '04', name: 'Cloudflare Queues Pipeline', module: 'workers/publishWorker.ts', desc: '3-stage async Queue chain (Research -> Generate -> Publish) for Free plan limits' },
-  { id: '05', name: 'Cloudflare Cron Triggers', module: 'workers/taskWorker.ts', desc: 'Scheduled */15 scheduler/retries + daily & weekly analytics aggregation' },
-  { id: '06', name: 'AI Provider Failover', module: 'services/aiProviderManager.ts', desc: 'Gemini REST, OpenRouter, API-NEX & Custom OpenAI with D1 circuit breaker' },
-  { id: '07', name: 'Tavily + AI Research', module: 'services/researchService.ts', desc: 'Live Tavily Web Search API grounding + structured keyword & outline synthesis' },
-  { id: '08', name: 'SEO Audit & JSON-LD', module: 'services/seoService.ts', desc: 'Keyword density, heading audit, AI meta rewrite & BlogPosting/FAQPage Schema' },
+  { id: '03', name: 'Cloudflare D1 Persistence', module: 'db/repositories.ts', desc: '14 relational SQLite tables via DB binding & SQL migrations (0001 & 0002)' },
+  { id: '04', name: 'Cloudflare Queues Pipeline', module: 'workers/publishWorker.ts', desc: '3-stage async Queue chain + duplicate & pre-publish quality gate' },
+  { id: '05', name: 'Cloudflare Cron Triggers', module: 'workers/taskWorker.ts', desc: 'Scheduled */15 scheduler + daily/weekly analytics, SEO & content update checks' },
+  { id: '06', name: 'Multi-Key AI Failover', module: 'services/aiProviderManager.ts', desc: 'Gemini, OpenRouter, API-NEX & Custom OpenAI with multi-key rotation & priority UI' },
+  { id: '07', name: 'Tavily + AI Research', module: 'services/researchService.ts', desc: 'Trending topic discovery, Tavily Web Search & competition/intent synthesis' },
+  { id: '08', name: 'SEO Audit & Quality Gate', module: 'services/seoService.ts', desc: 'Alt text, canonical, anti-stuffing, JSON-LD & internal link suggestions' },
   { id: '09', name: 'Blogger OAuth2 & API v3', module: 'services/bloggerService.ts', desc: 'D1-cached Google OAuth token refresh + blog/post CRUD & draft publishing' },
-  { id: '10', name: 'Search Console & GA4', module: 'services/searchConsoleService.ts', desc: 'Search Analytics, sitemap submission, URL Inspection & GA4 Data API reports' },
-  { id: '11', name: 'Adsterra Ad Injection', module: 'services/adsterraService.ts', desc: 'Publisher API v3 stats + D1 slot configs & paragraph-safe HTML injection' },
+  { id: '10', name: 'GSC & GA4 Insights', module: 'workers/analyticsWorker.ts', desc: 'Period-over-period traffic drop analysis & real URL Inspection coverage' },
+  { id: '11', name: 'Adsterra Ad Injection', module: 'services/adsterraService.ts', desc: 'Desktop/mobile targeting, section placement & structure-aware density caps' },
   { id: '12', name: 'Idempotency & Retries', module: 'services/taskQueueService.ts', desc: 'Unique idempotency_key deduplication, atomic claim, backoff & dead-letter queue' },
   { id: '13', name: 'Pause / Resume / E-Stop', module: 'services/agentControlService.ts', desc: 'D1-backed control plane cancelling pending tasks & pipelines on Emergency Stop' },
   { id: '14', name: 'FCM & D1 Notifications', module: 'services/fcmService.ts', desc: 'WebCrypto FCM HTTP v1 push delivery + persistent D1 notification inbox' },
   { id: '15', name: 'Optional Cloudflare R2', module: 'services/r2MediaService.ts', desc: 'MEDIA_BUCKET binding for HTML article backups and media asset storage' },
-  { id: '16', name: 'GitHub Actions CI/CD', module: '.github/workflows/', desc: 'Automated lint, Vitest, D1 migration apply & wrangler deploy via GitHub Secrets' },
+  { id: '16', name: 'GitHub Actions CI/CD', module: '.github/workflows/', desc: 'Automated lint, Vitest, D1 migration apply & wrangler deploy via cloudflare-deploy.yml' },
 ];
 
 const KOTLIN_SNIPPET = `// Drop into your Android Setup Wizard: /backend/android-integration/CloudRunHealthVerifier.kt
@@ -60,7 +61,7 @@ if (result.verified) {
 const BENGALI_STEPS = [
   {
     step: '১. Cloudflare D1 ডাটাবেস তৈরি (Dashboard থেকে)',
-    detail: 'dash.cloudflare.com-এ লগইন করে Storage & Databases > D1 SQL Database > Create Database ("autoblogger-db") তৈরি করুন। প্রাপ্ত Database ID-টি backend/wrangler.jsonc ফাইলে বসান এবং migrations/0001_initial_schema.sql রান করুন।',
+    detail: 'dash.cloudflare.com-এ লগইন করে Storage & Databases > D1 SQL Database > Create Database ("autoblogger-db") তৈরি করুন। প্রাপ্ত Database ID-টি backend/wrangler.jsonc ফাইলে বসান এবং 0001 ও 0002 মাইগ্রেশন রান করুন।',
   },
   {
     step: '২. Cloudflare Queues ও R2 Bucket তৈরি',
@@ -68,11 +69,11 @@ const BENGALI_STEPS = [
   },
   {
     step: '৩. Cloudflare Workers-এ GitHub সংযুক্ত করুন',
-    detail: 'Compute (Workers) > Workers & Pages > Create > Connect to Git সিলেক্ট করে আপনার GitHub রিপোজিটরি দিন (Path: backend, Deploy: npx wrangler deploy) অথবা .github/workflows/deploy-cloudflare-worker.yml ব্যবহার করুন।',
+    detail: 'Compute (Workers) > Workers & Pages > Create > Connect to Git সিলেক্ট করে আপনার GitHub রিপোজিটরি দিন (Path: backend, Deploy: npx wrangler deploy) অথবা .github/workflows/cloudflare-deploy.yml ব্যবহার করুন।',
   },
   {
     step: '৪. Cloudflare Secrets যোগ করুন',
-    detail: 'Worker Settings > Variables and Secrets থেকে BACKEND_API_SECRET, SCHEDULER_SHARED_SECRET, GEMINI_API_KEY, TAVILY_API_KEY, GOOGLE_OAUTH_* ও ADSTERRA_API_KEY সেট করুন।',
+    detail: 'Worker Settings > Variables and Secrets থেকে BACKEND_API_SECRET, SCHEDULER_SHARED_SECRET, GEMINI_API_KEYS, TAVILY_API_KEY, GOOGLE_OAUTH_* ও ADSTERRA_API_KEY সেট করুন।',
   },
   {
     step: '৫. Worker URL সংগ্রহ ও Android Setup Wizard-এ যাচাই',

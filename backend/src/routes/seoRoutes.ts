@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { listRecentInternalLinkTargets } from '../db/repositories.js';
 import { AppVariables, requireAuth } from '../middleware/auth.js';
 import { auditSeo, buildArticleJsonLd, optimizeMetadataWithAI } from '../services/seoService.js';
 import { WorkerEnv } from '../types/index.js';
@@ -13,7 +14,9 @@ const auditSchema = z.object({
   htmlContent: z.string().min(1),
   primaryKeyword: z.string().min(1).max(150),
   slug: z.string().max(150).optional(),
+  canonicalUrl: z.string().max(500).optional(),
   faqItems: z.array(z.object({ question: z.string(), answer: z.string() })).optional(),
+  minQualityWordCount: z.number().int().min(50).max(2000).optional(),
 });
 
 const optimizeSchema = z.object({
@@ -33,7 +36,11 @@ const schemaBuilderInput = z.object({
 
 seoRoutes.post('/audit', async (c) => {
   const input = auditSchema.parse(await c.req.json());
-  const audit = auditSeo(input);
+  const internalLinkTargets = await listRecentInternalLinkTargets(c.env.DB, undefined, 6);
+  const audit = auditSeo({
+    ...input,
+    internalLinkTargets,
+  });
   return c.json({ audit });
 });
 

@@ -16,13 +16,17 @@ CREATE TABLE IF NOT EXISTS agent_state (
 INSERT OR IGNORE INTO agent_state (id, status, emergency_stop, reason, updated_by, updated_at)
 VALUES ('agent', 'running', 0, 'Initial boot', 'system', datetime('now'));
 
--- 2. AI Provider Circuit Breaker & Health State
+-- 2. AI Provider Circuit Breaker, Usage & Health State
 CREATE TABLE IF NOT EXISTS ai_provider_health (
   provider TEXT PRIMARY KEY,
   configured INTEGER NOT NULL DEFAULT 0,
   healthy INTEGER NOT NULL DEFAULT 0,
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
   circuit_open_until INTEGER,
+  total_requests INTEGER NOT NULL DEFAULT 0,
+  total_errors INTEGER NOT NULL DEFAULT 0,
+  rate_limit_hits INTEGER NOT NULL DEFAULT 0,
+  last_model_used TEXT,
   last_error TEXT,
   last_success_at TEXT,
   last_failure_at TEXT,
@@ -53,7 +57,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
 
 CREATE INDEX IF NOT EXISTS idx_campaigns_enabled ON campaigns (enabled);
 
--- 4. Multi-Stage Async Pipeline Runs (breaks long AI tasks for Cloudflare Free plan limits)
+-- 4. Multi-Stage Async Pipeline Runs
 CREATE TABLE IF NOT EXISTS pipeline_runs (
   id TEXT PRIMARY KEY,
   campaign_id TEXT,
@@ -79,7 +83,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_stage ON pipeline_runs (stage, updated_at DESC);
 
--- 5. Published Blogger Posts
+-- 5. Published Blogger Posts (with duplicate prevention hash & audit tracking)
 CREATE TABLE IF NOT EXISTS posts (
   id TEXT PRIMARY KEY,
   pipeline_id TEXT,
@@ -89,6 +93,8 @@ CREATE TABLE IF NOT EXISTS posts (
   blogger_url TEXT NOT NULL,
   title TEXT NOT NULL,
   slug TEXT NOT NULL,
+  content_hash TEXT,
+  canonical_url TEXT,
   meta_description TEXT NOT NULL DEFAULT '',
   primary_keyword TEXT NOT NULL,
   secondary_keywords_json TEXT NOT NULL DEFAULT '[]',
@@ -99,12 +105,15 @@ CREATE TABLE IF NOT EXISTS posts (
   model_used TEXT NOT NULL,
   is_draft INTEGER NOT NULL DEFAULT 0,
   r2_asset_key TEXT,
+  last_audited_at TEXT,
   triggered_by TEXT NOT NULL,
   published_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_posts_published_at ON posts (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_campaign_id ON posts (campaign_id);
+CREATE INDEX IF NOT EXISTS idx_posts_content_hash ON posts (content_hash);
+CREATE INDEX IF NOT EXISTS idx_posts_slug ON posts (slug);
 
 -- 6. Persistent Task Queue with Idempotency & Retry State
 CREATE TABLE IF NOT EXISTS task_queue (
@@ -127,11 +136,14 @@ CREATE TABLE IF NOT EXISTS task_queue (
 CREATE INDEX IF NOT EXISTS idx_task_queue_status_retry ON task_queue (status, next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_task_queue_created_at ON task_queue (created_at DESC);
 
--- 7. Adsterra Ad Injection Configurations
+-- 7. Adsterra Ad Injection Configurations (Desktop, Mobile, Section-aware)
 CREATE TABLE IF NOT EXISTS ad_configs (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  placement_type TEXT NOT NULL CHECK (placement_type IN ('top_banner', 'mid_article', 'bottom_banner', 'social_bar', 'native_banner')),
+  placement_type TEXT NOT NULL CHECK (placement_type IN (
+    'top_banner', 'in_article', 'mid_article', 'between_sections', 'end_of_article', 'bottom_banner', 'social_bar', 'native_banner'
+  )),
+  device_target TEXT NOT NULL DEFAULT 'all' CHECK (device_target IN ('all', 'desktop', 'mobile')),
   script_html TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
   insert_after_paragraph INTEGER,
@@ -163,7 +175,7 @@ CREATE TABLE IF NOT EXISTS device_tokens (
   updated_at TEXT NOT NULL
 );
 
--- 10. Notification History (allows Android polling + FCM delivery tracking)
+-- 10. Notification History
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -179,7 +191,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications (created_at DESC);
 
--- 11. Cached Google OAuth Access Tokens (avoids redundant OAuth refreshes across Worker isolates)
+-- 11. Cached Google OAuth Access Tokens
 CREATE TABLE IF NOT EXISTS oauth_tokens (
   provider TEXT PRIMARY KEY,
   access_token TEXT NOT NULL,

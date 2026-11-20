@@ -15,7 +15,11 @@ import {
 import { QueueTaskMessage, WorkerEnv } from '../types/index.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import { runAnalyticsSyncJob } from './analyticsWorker.js';
+import {
+  runAnalyticsSyncJob,
+  runContentUpdateCheckJob,
+  runSeoAuditBatchJob,
+} from './analyticsWorker.js';
 import {
   executePipelineGenerateStage,
   executePipelinePublishStage,
@@ -107,6 +111,14 @@ export async function executeTaskById(
         result = await runAnalyticsSyncJob(env, 'weekly');
         break;
       }
+      case 'SEO_AUDIT_BATCH': {
+        result = await runSeoAuditBatchJob(env);
+        break;
+      }
+      case 'CONTENT_UPDATE_CHECK': {
+        result = await runContentUpdateCheckJob(env);
+        break;
+      }
       case 'SEND_NOTIFICATION': {
         result = await sendNotification(
           env,
@@ -156,11 +168,17 @@ export async function executeTaskById(
       error: failure.message,
     });
 
-    await logSystemEvent(env.DB, 'error', 'task_worker', `Task ${claimed.id} (${claimed.type}) failed`, {
-      attempts: claimed.attempts,
-      nextStatus: failure.status,
-      error: failure.message,
-    });
+    await logSystemEvent(
+      env.DB,
+      'error',
+      'task_worker',
+      `Task ${claimed.id} (${claimed.type}) failed`,
+      {
+        attempts: claimed.attempts,
+        nextStatus: failure.status,
+        error: failure.message,
+      }
+    );
 
     if (failure.status === 'dead_letter') {
       try {
@@ -236,7 +254,7 @@ export async function handleScheduledCron(
 
   logger.info('Cloudflare Cron Trigger fired', { cron });
 
-  // 1. Daily Analytics Sync (50 23 * * *)
+  // 1. Daily Analytics Sync & Traffic Drop Insights (50 23 * * *)
   if (cron === '50 23 * * *') {
     await enqueueTask(env, {
       type: 'SYNC_ANALYTICS_DAILY',
@@ -247,12 +265,24 @@ export async function handleScheduledCron(
     return;
   }
 
-  // 2. Weekly Analytics Sync (55 23 * * 0)
+  // 2. Weekly Analytics, SEO Batch Audit & Content Freshness Check (55 23 * * 0)
   if (cron === '55 23 * * 0') {
     await enqueueTask(env, {
       type: 'SYNC_ANALYTICS_WEEKLY',
       createdBy: 'cron:weekly',
       idempotencyKey: `cron:analytics:weekly:${dateKey.slice(0, 10)}`,
+      payload: { cron },
+    });
+    await enqueueTask(env, {
+      type: 'SEO_AUDIT_BATCH',
+      createdBy: 'cron:weekly',
+      idempotencyKey: `cron:seo-audit:${dateKey.slice(0, 10)}`,
+      payload: { cron },
+    });
+    await enqueueTask(env, {
+      type: 'CONTENT_UPDATE_CHECK',
+      createdBy: 'cron:weekly',
+      idempotencyKey: `cron:content-update:${dateKey.slice(0, 10)}`,
       payload: { cron },
     });
     return;

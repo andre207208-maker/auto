@@ -10,11 +10,15 @@ BACKEND_API_SECRET=change-this-to-a-strong-random-32-char-secret
 SCHEDULER_SHARED_SECRET=change-this-to-another-strong-random-secret
 FIREBASE_PROJECT_ID=
 
-# AI Providers (Configure at least one; failover uses AI_PROVIDER_ORDER)
+# AI Providers (Configure single key or comma-separated multiple keys for automatic rotation)
 GEMINI_API_KEY=
+# GEMINI_API_KEYS=key1,key2
 OPENROUTER_API_KEY=
+# OPENROUTER_API_KEYS=key1,key2
 APINEX_API_KEY=
+# APINEX_API_KEYS=key1,key2
 CUSTOM_AI_API_KEY=
+# CUSTOM_AI_API_KEYS=key1,key2
 CUSTOM_AI_BASE_URL=
 CUSTOM_AI_MODEL=
 

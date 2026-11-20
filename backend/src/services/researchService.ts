@@ -5,6 +5,7 @@ import {
   WorkerEnv,
 } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { sanitizePlainText } from '../utils/sanitize.js';
 import { generateWithFailover } from './aiProviderManager.js';
 
 function stripMarkdownFences(raw: string): string {
@@ -31,7 +32,7 @@ export async function searchTavily(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: env.TAVILY_API_KEY,
-        query,
+        query: sanitizePlainText(query, 400),
         search_depth: 'basic',
         max_results: maxResults,
         include_answer: false,
@@ -65,6 +66,82 @@ export async function searchTavily(
   }
 }
 
+export async function discoverTrendingTopics(
+  env: WorkerEnv,
+  params: {
+    niche: string;
+    language?: string;
+    count?: number;
+    preferredProvider?: AIProviderName;
+  }
+): Promise<{
+  niche: string;
+  topics: Array<{
+    topic: string;
+    primaryKeyword: string;
+    searchIntent: 'informational' | 'commercial' | 'transactional' | 'navigational';
+    estimatedCompetition: 'low' | 'medium' | 'high';
+    whyTrending: string;
+  }>;
+  sources: TavilySearchSource[];
+  providerUsed: AIProviderName;
+}> {
+  const niche = sanitizePlainText(params.niche, 200);
+  const language = sanitizePlainText(params.language || 'English', 60);
+  const count = Math.min(Math.max(1, params.count || 5), 10);
+
+  const sources = await searchTavily(env, `${niche} latest trends news updates 2026`, 6);
+  const sourceSummary =
+    sources.length > 0
+      ? `Live Web Sources:\n${sources
+          .map((s, idx) => `${idx + 1}. ${s.title} (${s.url}): ${s.content}`)
+          .join('\n')}`
+      : 'No live web sources available; focus on high-utility evergreen + current niche demand.';
+
+  const prompt = `
+Discover ${count} original, high-potential blog topic ideas for the niche "${niche}" in "${language}".
+${sourceSummary}
+
+Return STRICT JSON matching this shape:
+{
+  "topics": [
+    {
+      "topic": "string",
+      "primaryKeyword": "string",
+      "searchIntent": "informational | commercial | transactional | navigational",
+      "estimatedCompetition": "low | medium | high",
+      "whyTrending": "short factual reason"
+    }
+  ]
+}
+`;
+
+  const aiRes = await generateWithFailover(env, {
+    prompt,
+    systemInstruction:
+      'You are an SEO trend analyst. Output strict JSON only with practical, non-clickbait topic opportunities.',
+    preferredProvider: params.preferredProvider,
+    jsonMode: true,
+  });
+
+  const parsed = JSON.parse(stripMarkdownFences(aiRes.text)) as {
+    topics: Array<{
+      topic: string;
+      primaryKeyword: string;
+      searchIntent: 'informational' | 'commercial' | 'transactional' | 'navigational';
+      estimatedCompetition: 'low' | 'medium' | 'high';
+      whyTrending: string;
+    }>;
+  };
+
+  return {
+    niche,
+    topics: Array.isArray(parsed.topics) ? parsed.topics.slice(0, count) : [],
+    sources,
+    providerUsed: aiRes.provider,
+  };
+}
+
 export async function researchTopic(
   env: WorkerEnv,
   params: {
@@ -75,10 +152,10 @@ export async function researchTopic(
     preferredProvider?: AIProviderName;
   }
 ): Promise<ResearchTopicResult> {
-  const language = params.language || 'English';
-  const query = params.seedKeyword
-    ? `${params.seedKeyword} ${params.niche}`
-    : `${params.niche} trending topics guide`;
+  const niche = sanitizePlainText(params.niche, 200);
+  const seedKeyword = params.seedKeyword ? sanitizePlainText(params.seedKeyword, 200) : undefined;
+  const language = sanitizePlainText(params.language || 'English', 60);
+  const query = seedKeyword ? `${seedKeyword} ${niche}` : `${niche} trending topics guide`;
 
   const tavilySources = await searchTavily(env, query, 5);
   const tavilyContext =
@@ -89,11 +166,11 @@ export async function researchTopic(
       : '';
 
   const prompt = `
-Perform deep SEO topic and keyword research for a blog article.
-Niche: ${params.niche}
-Seed Keyword: ${params.seedKeyword || 'Auto-discover highest opportunity topic in this niche'}
+Perform deep SEO topic, search intent, and competition research for a helpful, user-first blog article.
+Niche: ${niche}
+Seed Keyword: ${seedKeyword || 'Auto-discover highest opportunity topic in this niche'}
 Target Language: ${language}
-Target Audience: ${params.targetAudience || 'General readers searching for actionable answers'}
+Target Audience: ${sanitizePlainText(params.targetAudience || 'General readers searching for actionable answers', 300)}
 ${tavilyContext}
 
 Return STRICT JSON matching this exact shape (no markdown, no explanation):
@@ -102,6 +179,7 @@ Return STRICT JSON matching this exact shape (no markdown, no explanation):
   "primaryKeyword": "string",
   "secondaryKeywords": ["string", "string", "string", "string", "string"],
   "searchIntent": "informational | commercial | transactional | navigational",
+  "competitionAnalysis": "Concise 2-sentence assessment of SERP competition and content angle to differentiate",
   "suggestedTitles": ["string", "string", "string"],
   "outline": [
     {
@@ -118,7 +196,7 @@ Return STRICT JSON matching this exact shape (no markdown, no explanation):
   const response = await generateWithFailover(env, {
     prompt,
     systemInstruction:
-      'You are an expert SEO content strategist. Output valid JSON only with high-intent, evergreen blog research.',
+      'You are an expert SEO content strategist. Output valid JSON only with high-intent, useful blog research.',
     preferredProvider: params.preferredProvider,
     jsonMode: true,
   });
