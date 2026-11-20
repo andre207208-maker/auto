@@ -28,7 +28,7 @@
     {
       "binding": "DB",
       "database_name": "autoblogger-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "be03f692-a162-4f58-a934-d6c5335ee337",
       "migrations_dir": "migrations"
     }
   ],
