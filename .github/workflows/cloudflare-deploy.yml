@@ -54,7 +54,11 @@ jobs:
             echo "Missing Cloudflare Account ID"
             exit 1
           fi
-          npx wrangler d1 migrations apply DB --remote
+          if grep -q '"00000000-0000-0000-0000-000000000000"' wrangler.jsonc; then
+            echo "::error file=backend/wrangler.jsonc,line=31::Placeholder D1 database_id detected. Replace 00000000-0000-0000-0000-000000000000 with your real Cloudflare D1 UUID for autoblogger-db."
+            exit 1
+          fi
+          npx wrangler d1 migrations apply autoblogger-db --remote
 
       - name: Deploy Cloudflare Worker
         if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
