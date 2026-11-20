@@ -1,0 +1,6 @@
+{
+  "name": "AUTOBLOGGER AI Cloud Backend",
+  "description": "Production Cloud Run backend codebase, live /health verifier, and Bengali mobile deployment console for AUTOBLOGGER AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
