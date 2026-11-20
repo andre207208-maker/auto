@@ -1,7 +1,6 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
-import { requireAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { AppVariables, requireAuth } from '../middleware/auth.js';
 import {
   deleteBloggerPost,
   getBlogDetails,
@@ -10,9 +9,10 @@ import {
   publishBloggerPost,
   updateBloggerPost,
 } from '../services/bloggerService.js';
+import { WorkerEnv } from '../types/index.js';
 
-const router = Router();
-router.use(requireAuth);
+const bloggerRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
+bloggerRoutes.use('*', requireAuth);
 
 const createPostSchema = z.object({
   blogId: z.string().optional(),
@@ -29,66 +29,46 @@ const updatePostSchema = z.object({
   labels: z.array(z.string().max(100)).max(20).optional(),
 });
 
-router.get(
-  '/blogs',
-  asyncHandler(async (_req, res) => {
-    const data = await listUserBlogs();
-    res.json(data);
-  })
-);
+bloggerRoutes.get('/blogs', async (c) => {
+  const data = await listUserBlogs(c.env);
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/blogs/:blogId',
-  asyncHandler(async (req, res) => {
-    const data = await getBlogDetails(req.params.blogId);
-    res.json(data);
-  })
-);
+bloggerRoutes.get('/blogs/:blogId', async (c) => {
+  const data = await getBlogDetails(c.env, c.req.param('blogId'));
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/posts',
-  asyncHandler(async (req, res) => {
-    const data = await listBlogPosts({
-      blogId: typeof req.query.blogId === 'string' ? req.query.blogId : undefined,
-      maxResults: req.query.maxResults ? Number(req.query.maxResults) : 20,
-      status:
-        req.query.status === 'draft' || req.query.status === 'scheduled'
-          ? req.query.status
-          : 'live',
-      pageToken: typeof req.query.pageToken === 'string' ? req.query.pageToken : undefined,
-    });
-    res.json(data);
-  })
-);
+bloggerRoutes.get('/posts', async (c) => {
+  const statusQuery = c.req.query('status');
+  const maxResultsQuery = c.req.query('maxResults');
+  const data = await listBlogPosts(c.env, {
+    blogId: c.req.query('blogId'),
+    maxResults: maxResultsQuery ? Number(maxResultsQuery) : 20,
+    status: statusQuery === 'draft' || statusQuery === 'scheduled' ? statusQuery : 'live',
+    pageToken: c.req.query('pageToken'),
+  });
+  return c.json(data as Record<string, unknown>);
+});
 
-router.post(
-  '/posts',
-  asyncHandler(async (req, res) => {
-    const input = createPostSchema.parse(req.body);
-    const post = await publishBloggerPost(input);
-    res.status(201).json({ post });
-  })
-);
+bloggerRoutes.post('/posts', async (c) => {
+  const input = createPostSchema.parse(await c.req.json());
+  const post = await publishBloggerPost(c.env, input);
+  return c.json({ post }, 201);
+});
 
-router.patch(
-  '/posts/:postId',
-  asyncHandler(async (req, res) => {
-    const input = updatePostSchema.parse(req.body);
-    const post = await updateBloggerPost({
-      ...input,
-      postId: req.params.postId,
-    });
-    res.json({ post });
-  })
-);
+bloggerRoutes.patch('/posts/:postId', async (c) => {
+  const input = updatePostSchema.parse(await c.req.json());
+  const post = await updateBloggerPost(c.env, {
+    ...input,
+    postId: c.req.param('postId'),
+  });
+  return c.json({ post });
+});
 
-router.delete(
-  '/posts/:postId',
-  asyncHandler(async (req, res) => {
-    const blogId = typeof req.query.blogId === 'string' ? req.query.blogId : undefined;
-    await deleteBloggerPost(blogId, req.params.postId);
-    res.status(204).send();
-  })
-);
+bloggerRoutes.delete('/posts/:postId', async (c) => {
+  await deleteBloggerPost(c.env, c.req.query('blogId'), c.req.param('postId'));
+  return c.body(null, 204);
+});
 
-export default router;
+export default bloggerRoutes;

@@ -1,20 +1,23 @@
-import { env } from '../config/env.js';
-import { getDb, getFirebaseStatus } from '../config/firebase.js';
-import { AppError } from '../middleware/errorHandler.js';
-import { AdsterraPlacementConfig } from '../types/index.js';
+import {
+  deleteAdConfigRow,
+  listAdConfigRows,
+  upsertAdConfigRow,
+} from '../db/repositories.js';
+import { AdsterraPlacementConfig, WorkerEnv } from '../types/index.js';
+import { AppError } from '../utils/errors.js';
 import { isTransientHttpStatus, withRetry } from '../utils/retry.js';
-import { COLLECTIONS } from './firestoreService.js';
 
-async function adsterraFetch<T>(path: string, query?: Record<string, string>): Promise<T> {
+async function adsterraFetch<T>(
+  env: WorkerEnv,
+  path: string,
+  query?: Record<string, string>
+): Promise<T> {
   if (!env.ADSTERRA_API_KEY) {
-    throw new AppError(
-      'ADSTERRA_API_KEY is not configured',
-      503,
-      'ADSTERRA_NOT_CONFIGURED'
-    );
+    throw new AppError('ADSTERRA_API_KEY is not configured', 503, 'ADSTERRA_NOT_CONFIGURED');
   }
 
-  const url = new URL(`${env.ADSTERRA_BASE_URL.replace(/\/+$/, '')}${path}`);
+  const base = (env.ADSTERRA_BASE_URL || 'https://api3.adsterratools.com/publisher').replace(/\/+$/, '');
+  const url = new URL(`${base}${path}`);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v) {
@@ -27,7 +30,7 @@ async function adsterraFetch<T>(path: string, query?: Record<string, string>): P
     async () => {
       const response = await fetch(url.toString(), {
         headers: {
-          'X-API-Key': env.ADSTERRA_API_KEY,
+          'X-API-Key': env.ADSTERRA_API_KEY!,
           Accept: 'application/json',
         },
       });
@@ -55,21 +58,24 @@ async function adsterraFetch<T>(path: string, query?: Record<string, string>): P
   );
 }
 
-export async function getAdsterraDomains(): Promise<unknown> {
-  return adsterraFetch('/domains.json');
+export async function getAdsterraDomains(env: WorkerEnv): Promise<unknown> {
+  return adsterraFetch(env, '/domains.json');
 }
 
-export async function getAdsterraPlacements(): Promise<unknown> {
-  return adsterraFetch('/placements.json');
+export async function getAdsterraPlacements(env: WorkerEnv): Promise<unknown> {
+  return adsterraFetch(env, '/placements.json');
 }
 
-export async function getAdsterraStats(params: {
-  startDate: string;
-  finishDate: string;
-  groupBy?: 'date' | 'domain' | 'placement' | 'country';
-  domainId?: string;
-}): Promise<unknown> {
-  return adsterraFetch('/stats.json', {
+export async function getAdsterraStats(
+  env: WorkerEnv,
+  params: {
+    startDate: string;
+    finishDate: string;
+    groupBy?: 'date' | 'domain' | 'placement' | 'country';
+    domainId?: string;
+  }
+): Promise<unknown> {
+  return adsterraFetch(env, '/stats.json', {
     start_date: params.startDate,
     finish_date: params.finishDate,
     group_by: params.groupBy || 'date',
@@ -77,32 +83,28 @@ export async function getAdsterraStats(params: {
   });
 }
 
-export async function listAdConfigs(): Promise<AdsterraPlacementConfig[]> {
-  if (!getFirebaseStatus().initialized) {
-    return [];
-  }
-  const snap = await getDb().collection(COLLECTIONS.AD_CONFIGS).get();
-  return snap.docs.map((doc) => ({ id: doc.id, ...(doc.data() as Omit<AdsterraPlacementConfig, 'id'>) }));
+export async function listAdConfigs(env: WorkerEnv): Promise<AdsterraPlacementConfig[]> {
+  return listAdConfigRows(env.DB);
 }
 
 export async function upsertAdConfig(
+  env: WorkerEnv,
   config: Omit<AdsterraPlacementConfig, 'updatedAt'>
 ): Promise<AdsterraPlacementConfig> {
-  const db = getDb();
   const payload: AdsterraPlacementConfig = {
     ...config,
     updatedAt: new Date().toISOString(),
   };
-  await db.collection(COLLECTIONS.AD_CONFIGS).doc(config.id).set(payload, { merge: true });
+  await upsertAdConfigRow(env.DB, payload);
   return payload;
 }
 
-export async function deleteAdConfig(id: string): Promise<void> {
-  await getDb().collection(COLLECTIONS.AD_CONFIGS).doc(id).delete();
+export async function deleteAdConfig(env: WorkerEnv, id: string): Promise<void> {
+  await deleteAdConfigRow(env.DB, id);
 }
 
-export async function injectAdsIntoPostHtml(html: string): Promise<string> {
-  const configs = await listAdConfigs();
+export async function injectAdsIntoPostHtml(env: WorkerEnv, html: string): Promise<string> {
+  const configs = await listAdConfigs(env);
   const enabledConfigs = configs.filter((c) => c.enabled && c.scriptHtml.trim().length > 0);
   if (enabledConfigs.length === 0) {
     return html;

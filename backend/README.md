@@ -1,109 +1,100 @@
-# AUTOBLOGGER AI — Cloud Run Backend
+# AUTOBLOGGER AI — Cloudflare Workers Backend
 
-Production-ready Node.js + TypeScript + Express.js backend for **AUTOBLOGGER AI**, designed for stateless execution on **Google Cloud Run** with **Firebase Admin SDK**, **Firestore**, **Cloud Tasks**, **Cloud Scheduler**, **Google Blogger API v3**, **Google Search Console**, **Google Analytics 4**, **Adsterra**, **FCM**, and **Multi-Provider AI Failover** (Gemini, OpenRouter, API-NEX, Custom OpenAI-compatible).
-
----
-
-## Directory Structure
-
-```text
-/backend
-├── src/
-│   ├── config/          # Zod-validated env config & Firebase Admin initialization
-│   ├── middleware/      # Firebase/API-key auth, rate limiter, request logger, error handler
-│   ├── routes/          # Express v1 routers (/health, /api/v1/*)
-│   ├── services/        # AI failover, Blogger, SEO, GSC, GA4, Adsterra, FCM, Queue, Scheduler
-│   ├── types/           # Shared TypeScript interfaces
-│   ├── utils/           # Structured Cloud Logging & exponential backoff retry helper
-│   ├── workers/         # Publish pipeline, persistent task runner, daily/weekly analytics
-│   └── server.ts        # Express entrypoint (PORT, trust proxy, graceful shutdown)
-├── android-integration/ # Kotlin GET /health verifier snippet for Android Setup Wizard
-├── Dockerfile           # Multi-stage Node 20 Alpine Cloud Run container
-├── .dockerignore
-├── .env.example
-├── package.json
-├── tsconfig.json
-├── DEPLOYMENT_GUIDE_BN.md
-└── README.md
-```
+Production-ready **Cloudflare Workers + TypeScript + Hono + D1 + Queues + Cron Triggers + R2** backend for **AUTOBLOGGER AI**, migrated from Node.js/Express/Firebase/Cloud Run to Cloudflare's Free-compatible serverless edge architecture.
 
 ---
 
-## API Endpoints
+## Architecture Overview
 
-### Public Health & Discovery
-- `GET /` — Service metadata
-- `GET /health` — Cloud Run liveness & Android Setup Wizard verification (`200 OK` with `{ status: "ok", service, timestamp, firebaseConnected, agentStatus }`)
+| Layer | Technology | Binding / File |
+| :--- | :--- | :--- |
+| Edge HTTP / Queue / Cron | Cloudflare Workers + Hono | `src/index.ts` |
+| Relational Persistence | Cloudflare D1 (SQLite) | `DB` (`migrations/0001_initial_schema.sql`, `src/db/repositories.ts`) |
+| Async Jobs & Pipelines | Cloudflare Queues + D1 Idempotency | `TASK_QUEUE` (`src/services/taskQueueService.ts`, `src/workers/`) |
+| Scheduled Automation | Cloudflare Cron Triggers | `triggers.crons` (`*/15 * * * *`, `50 23 * * *`, `55 23 * * 0`) |
+| Optional Media Storage | Cloudflare R2 | `MEDIA_BUCKET` (`src/services/r2MediaService.ts`) |
+| AI Failover | Gemini, OpenRouter, API-NEX, Custom | `src/services/aiProviderManager.ts` (D1 circuit breaker) |
+| Web Research | Tavily Search API + AI Synthesis | `src/services/researchService.ts` |
+| Blogger / GSC / GA4 | Google OAuth2 + D1 Token Cache | `src/services/googleAuthService.ts` |
+| Monetization | Adsterra Publisher API + HTML Injector | `src/services/adsterraService.ts` |
+| Push & Inbox Alerts | WebCrypto FCM HTTP v1 + D1 `notifications` | `src/services/fcmService.ts` |
+
+### Free Plan Asynchronous Pipeline Design
+To stay safely within Cloudflare Workers Free CPU/execution limits, `POST /api/v1/content/publish-pipeline` never runs research + generation + Blogger publishing synchronously in one HTTP call. Instead, it creates a `pipeline_runs` row in D1 and chains 3 small Queue stages:
+1. `PIPELINE_RESEARCH` (Tavily + AI keyword/outline research)
+2. `PIPELINE_GENERATE` (long-form HTML article generation)
+3. `PIPELINE_OPTIMIZE_AND_PUBLISH` (SEO audit + JSON-LD + Adsterra injection + optional R2 HTML backup + Blogger publish + D1 + FCM notification)
+
+---
+
+## Android-Compatible REST API Contracts
+
+### Public Health Verification (Setup Wizard)
+- `GET /health` -> `200 OK`:
+  ```json
+  {
+    "status": "ok",
+    "service": "autoblogger-ai-backend",
+    "version": "2.0.0",
+    "runtime": "cloudflare-workers",
+    "environment": "production",
+    "timestamp": "2026-11-20T06:00:00.000Z",
+    "dbConnected": true,
+    "queueConfigured": true,
+    "r2Configured": true,
+    "agentStatus": "running"
+  }
+  ```
 
 ### Authenticated Endpoints (`/api/v1/*`)
-Provide either:
-- `Authorization: Bearer <Firebase_ID_Token>`
-- `X-API-Key: <BACKEND_API_SECRET>`
+Send `X-API-Key: <BACKEND_API_SECRET>` or `Authorization: Bearer <Firebase_ID_Token>` (verified via Web Crypto JWKS):
 
-| Module | Method & Path | Description |
-| :--- | :--- | :--- |
-| Health | `GET /api/v1/health/detailed` | Env diagnostics, Firebase status, AI provider circuit health (no secrets exposed) |
-| Agent Control | `GET /api/v1/agent/status` | Current agent state (`running` \| `paused` \| `stopped`) |
-| Agent Control | `POST /api/v1/agent/pause` | Pause autonomous publishing |
-| Agent Control | `POST /api/v1/agent/resume` | Resume autonomous publishing |
-| Agent Control | `POST /api/v1/agent/emergency-stop` | Immediately stop agent, cancel queued tasks, send FCM alert |
-| AI Manager | `GET /api/v1/ai/providers/health` | Circuit breaker & latency state for Gemini, OpenRouter, API-NEX, Custom |
-| AI Manager | `POST /api/v1/ai/generate` | Generate text/JSON with automatic multi-provider failover |
-| Content | `POST /api/v1/content/research` | Keyword & outline research |
-| Content | `POST /api/v1/content/generate` | Long-form SEO Blogger HTML article generation |
-| Content | `POST /api/v1/content/publish-pipeline` | Full research -> generate -> SEO -> Adsterra -> Blogger -> FCM pipeline |
-| SEO | `POST /api/v1/seo/audit` | Technical SEO score, keyword density, H1/H2 audit, JSON-LD generation |
-| SEO | `POST /api/v1/seo/optimize-metadata` | AI-assisted title/meta/slug optimization |
-| SEO | `POST /api/v1/seo/schema` | Generate Schema.org `BlogPosting` + `FAQPage` JSON-LD |
-| Blogger | `GET /api/v1/blogger/blogs` | List Blogger blogs for connected Google account |
-| Blogger | `GET /api/v1/blogger/posts` | List posts (`live`, `draft`, `scheduled`) |
-| Blogger | `POST /api/v1/blogger/posts` | Publish or save draft post |
-| Blogger | `PATCH /api/v1/blogger/posts/:postId` | Update post |
-| Blogger | `DELETE /api/v1/blogger/posts/:postId` | Delete post |
-| Analytics | `POST /api/v1/analytics/gsc/query` | Google Search Console Search Analytics query |
-| Analytics | `GET /api/v1/analytics/gsc/sitemaps` | List GSC sitemaps |
-| Analytics | `POST /api/v1/analytics/gsc/sitemaps/submit` | Submit sitemap URL |
-| Analytics | `POST /api/v1/analytics/gsc/inspect` | URL Inspection API check |
-| Analytics | `POST /api/v1/analytics/ga4/report` | Run GA4 Data API report |
-| Analytics | `GET /api/v1/analytics/ga4/top-pages` | Top pages from GA4 |
-| Analytics | `GET /api/v1/analytics/snapshots` | Stored daily/weekly Firestore snapshots |
-| Adsterra | `GET /api/v1/adsterra/domains` | List Adsterra domains |
-| Adsterra | `GET /api/v1/adsterra/placements` | List Adsterra placements |
-| Adsterra | `GET /api/v1/adsterra/stats` | Revenue/impressions statistics |
-| Adsterra | `GET/POST/DELETE /api/v1/adsterra/configs` | Manage ad injection slots in Firestore |
-| Adsterra | `POST /api/v1/adsterra/preview-inject` | Preview HTML with ad slots injected |
-| Scheduler | `GET/POST/DELETE /api/v1/scheduler/campaigns` | Manage autonomous publishing campaigns |
-| Scheduler | `POST /api/v1/scheduler/tick` | Triggered by Cloud Scheduler (`X-Scheduler-Secret`) |
-| Tasks | `GET /api/v1/tasks` & `GET /api/v1/tasks/:taskId` | Inspect persistent Firestore task queue |
-| Tasks | `POST /api/v1/tasks/enqueue` | Enqueue persistent task (+ Cloud Tasks if enabled) |
-| Tasks | `POST /api/v1/tasks/execute` | Cloud Tasks HTTP target handler |
-| Tasks | `POST /api/v1/tasks/process-retries` | Cloud Scheduler retry sweep |
-| Notifications | `POST /api/v1/notifications/tokens/register` | Register Android FCM device token |
-| Notifications | `POST /api/v1/notifications/send` | Send push notification |
-| Workers | `POST /api/v1/workers/analytics/daily` | Daily analytics aggregation job |
-| Workers | `POST /api/v1/workers/analytics/weekly` | Weekly analytics aggregation job |
-| Workers | `GET /api/v1/workers/logs` | Recent persistent system logs |
+- **Agent Control:** `GET /api/v1/agent/status`, `POST /api/v1/agent/pause`, `POST /api/v1/agent/resume`, `POST /api/v1/agent/emergency-stop`
+- **AI Manager:** `GET /api/v1/ai/providers/health`, `POST /api/v1/ai/generate`
+- **Content & Pipelines:** `POST /api/v1/content/research`, `POST /api/v1/content/generate` (`202` queued), `POST /api/v1/content/publish-pipeline` (`202` queued), `GET /api/v1/content/pipelines/:pipelineId`, `GET /api/v1/content/posts`
+- **SEO:** `POST /api/v1/seo/audit`, `POST /api/v1/seo/optimize-metadata`, `POST /api/v1/seo/schema`
+- **Blogger:** `GET /api/v1/blogger/blogs`, `GET /api/v1/blogger/blogs/:blogId`, `GET /api/v1/blogger/posts`, `POST /api/v1/blogger/posts`, `PATCH /api/v1/blogger/posts/:postId`, `DELETE /api/v1/blogger/posts/:postId`
+- **Analytics:** `POST /api/v1/analytics/gsc/query`, `GET /api/v1/analytics/gsc/sitemaps`, `POST /api/v1/analytics/gsc/sitemaps/submit`, `POST /api/v1/analytics/gsc/inspect`, `POST /api/v1/analytics/ga4/report`, `GET /api/v1/analytics/ga4/top-pages`, `GET /api/v1/analytics/snapshots`
+- **Adsterra:** `GET /api/v1/adsterra/domains`, `GET /api/v1/adsterra/placements`, `GET /api/v1/adsterra/stats`, `GET/POST/DELETE /api/v1/adsterra/configs`, `POST /api/v1/adsterra/preview-inject`
+- **Scheduler:** `GET/POST/DELETE /api/v1/scheduler/campaigns`, `POST /api/v1/scheduler/tick`
+- **Tasks:** `GET /api/v1/tasks`, `GET /api/v1/tasks/:taskId`, `POST /api/v1/tasks/enqueue`, `POST /api/v1/tasks/process-retries`
+- **Notifications:** `GET /api/v1/notifications`, `POST /api/v1/notifications/tokens/register`, `POST /api/v1/notifications/tokens/unregister`, `POST /api/v1/notifications/send`
+- **Workers & Logs:** `POST /api/v1/workers/analytics/daily`, `POST /api/v1/workers/analytics/weekly`, `GET /api/v1/workers/logs`
+- **R2 Media (Optional):** `POST /api/v1/media/upload`, `GET /api/v1/media/:key`, `DELETE /api/v1/media/:key`
 
 ---
 
-## Local Development
+## Local Development & Testing
 
 ```bash
 cd backend
-cp .env.example .env
+cp .dev.vars.example .dev.vars
 npm install
+npm run db:migrate:local
 npm run check
 npm run dev
 ```
 
-Verify health locally:
+## Secrets Configuration (Production)
+
+Never store API keys in `wrangler.jsonc` or GitHub. Configure secrets in Cloudflare Dashboard (**Workers & Pages -> autoblogger-ai-backend -> Settings -> Variables and Secrets**) or via CLI:
 
 ```bash
-curl http://localhost:8080/health
+npx wrangler secret put BACKEND_API_SECRET
+npx wrangler secret put SCHEDULER_SHARED_SECRET
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put TAVILY_API_KEY
+npx wrangler secret put GOOGLE_OAUTH_CLIENT_ID
+npx wrangler secret put GOOGLE_OAUTH_CLIENT_SECRET
+npx wrangler secret put GOOGLE_OAUTH_REFRESH_TOKEN
 ```
 
----
+## GitHub Actions Deployment
 
-## Bengali Mobile + GitHub Deployment Guide
+Workflow: `/.github/workflows/deploy-cloudflare-worker.yml`. Add these **GitHub Repository Secrets**:
+- `CLOUDFLARE_API_TOKEN` (Workers Scripts Edit, D1 Edit, Queues Edit, R2 Edit)
+- `CLOUDFLARE_ACCOUNT_ID`
 
-Read the complete step-by-step Bengali deployment guide in [DEPLOYMENT_GUIDE_BN.md](./DEPLOYMENT_GUIDE_BN.md).
+## Bengali Deployment Guide
+
+Read the complete Cloudflare Workers Dashboard Bengali guide in [DEPLOYMENT_GUIDE_BN.md](./DEPLOYMENT_GUIDE_BN.md).

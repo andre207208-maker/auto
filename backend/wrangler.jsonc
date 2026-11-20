@@ -1,0 +1,65 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "autoblogger-ai-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-01",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "SERVICE_NAME": "autoblogger-ai-backend",
+    "ENVIRONMENT": "production",
+    "ALLOW_API_KEY_AUTH": "true",
+    "CORS_ALLOWED_ORIGINS": "*",
+    "AI_PROVIDER_ORDER": "gemini,openrouter,apinex,custom",
+    "AI_CIRCUIT_BREAKER_THRESHOLD": "3",
+    "AI_CIRCUIT_BREAKER_COOLDOWN_MS": "120000",
+    "GEMINI_MODEL": "gemini-4-hydrogen",
+    "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+    "OPENROUTER_MODEL": "google/gemini-2.5-flash",
+    "OPENROUTER_SITE_URL": "https://autoblogger.local",
+    "OPENROUTER_APP_NAME": "AUTOBLOGGER AI",
+    "APINEX_BASE_URL": "https://api.apinex.io/v1",
+    "APINEX_MODEL": "gpt-4o-mini",
+    "TAVILY_BASE_URL": "https://api.tavily.com",
+    "ADSTERRA_BASE_URL": "https://api3.adsterratools.com/publisher"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "autoblogger-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TASK_QUEUE",
+        "queue": "autoblogger-tasks"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "autoblogger-tasks",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "autoblogger-tasks-dlq"
+      }
+    ]
+  },
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "autoblogger-media"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "*/15 * * * *",
+      "50 23 * * *",
+      "55 23 * * 0"
+    ]
+  }
+}

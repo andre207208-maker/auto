@@ -1,9 +1,9 @@
-import { env } from '../config/env.js';
-import { AppError } from '../middleware/errorHandler.js';
+import { WorkerEnv } from '../types/index.js';
+import { AppError } from '../utils/errors.js';
 import { isTransientHttpStatus, withRetry } from '../utils/retry.js';
 import { getGoogleOAuthAccessToken } from './googleAuthService.js';
 
-function resolvePropertyId(propertyId?: string): string {
+function resolvePropertyId(env: WorkerEnv, propertyId?: string): string {
   const id = propertyId || env.GA4_PROPERTY_ID;
   if (!id) {
     throw new AppError(
@@ -15,16 +15,19 @@ function resolvePropertyId(propertyId?: string): string {
   return id.replace(/^properties\//, '');
 }
 
-export async function runGA4Report(params: {
-  propertyId?: string;
-  startDate: string;
-  endDate: string;
-  metrics?: string[];
-  dimensions?: string[];
-  limit?: number;
-}): Promise<unknown> {
-  const propId = resolvePropertyId(params.propertyId);
-  const accessToken = await getGoogleOAuthAccessToken();
+export async function runGA4Report(
+  env: WorkerEnv,
+  params: {
+    propertyId?: string;
+    startDate: string;
+    endDate: string;
+    metrics?: string[];
+    dimensions?: string[];
+    limit?: number;
+  }
+): Promise<unknown> {
+  const propId = resolvePropertyId(env, params.propertyId);
+  const accessToken = await getGoogleOAuthAccessToken(env);
 
   const metrics = (params.metrics || ['screenPageViews', 'sessions', 'activeUsers', 'bounceRate']).map(
     (name) => ({ name })
@@ -73,13 +76,16 @@ export async function runGA4Report(params: {
   );
 }
 
-export async function getGA4TopPages(params: {
-  propertyId?: string;
-  startDate: string;
-  endDate: string;
-  limit?: number;
-}): Promise<unknown> {
-  return runGA4Report({
+export async function getGA4TopPages(
+  env: WorkerEnv,
+  params: {
+    propertyId?: string;
+    startDate: string;
+    endDate: string;
+    limit?: number;
+  }
+): Promise<unknown> {
+  return runGA4Report(env, {
     propertyId: params.propertyId,
     startDate: params.startDate,
     endDate: params.endDate,

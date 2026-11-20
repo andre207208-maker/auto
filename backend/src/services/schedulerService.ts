@@ -1,30 +1,32 @@
-import crypto from 'crypto';
-import { getDb } from '../config/firebase.js';
-import { CampaignSchedule } from '../types/index.js';
+import {
+  deleteCampaignRow,
+  listCampaignRows,
+  updateCampaignQuotaRow,
+  upsertCampaignRow,
+} from '../db/repositories.js';
+import { CampaignSchedule, WorkerEnv } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { startAutonomousPipeline } from '../workers/publishWorker.js';
 import { assertAgentOperational } from './agentControlService.js';
-import { COLLECTIONS } from './firestoreService.js';
-import { enqueueTask } from './taskQueueService.js';
 
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export async function listCampaigns(): Promise<CampaignSchedule[]> {
-  const snap = await getDb().collection(COLLECTIONS.CAMPAIGNS).orderBy('createdAt', 'desc').get();
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<CampaignSchedule, 'id'>) }));
+export async function listCampaigns(env: WorkerEnv): Promise<CampaignSchedule[]> {
+  return listCampaignRows(env.DB, false);
 }
 
 export async function createOrUpdateCampaign(
+  env: WorkerEnv,
   input: Omit<CampaignSchedule, 'id' | 'postsPublishedToday' | 'createdAt' | 'updatedAt'> & {
     id?: string;
   }
 ): Promise<CampaignSchedule> {
-  const db = getDb();
+  const existingAll = await listCampaignRows(env.DB, false);
+  const existing = input.id ? existingAll.find((c) => c.id === input.id) : undefined;
   const id = input.id || crypto.randomUUID();
   const now = new Date().toISOString();
-  const docRef = db.collection(COLLECTIONS.CAMPAIGNS).doc(id);
-  const existing = await docRef.get();
 
   const payload: CampaignSchedule = {
     id,
@@ -39,42 +41,41 @@ export async function createOrUpdateCampaign(
     preferredProvider: input.preferredProvider,
     language: input.language || 'English',
     targetKeywords: input.targetKeywords || [],
-    lastRunAt: existing.exists ? (existing.data() as CampaignSchedule).lastRunAt || null : null,
-    postsPublishedToday: existing.exists
-      ? (existing.data() as CampaignSchedule).postsPublishedToday || 0
-      : 0,
-    lastResetDate: existing.exists
-      ? (existing.data() as CampaignSchedule).lastResetDate || todayIsoDate()
-      : todayIsoDate(),
-    createdAt: existing.exists ? (existing.data() as CampaignSchedule).createdAt : now,
+    lastRunAt: existing?.lastRunAt ?? null,
+    postsPublishedToday: existing?.postsPublishedToday ?? 0,
+    lastResetDate: existing?.lastResetDate ?? todayIsoDate(),
+    createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
 
-  await docRef.set(payload, { merge: true });
+  await upsertCampaignRow(env.DB, payload);
   return payload;
 }
 
-export async function deleteCampaign(id: string): Promise<void> {
-  await getDb().collection(COLLECTIONS.CAMPAIGNS).doc(id).delete();
+export async function deleteCampaign(env: WorkerEnv, id: string): Promise<void> {
+  await deleteCampaignRow(env.DB, id);
 }
 
-export async function runSchedulerTick(triggeredBy: string): Promise<{
+export async function runSchedulerTick(
+  env: WorkerEnv,
+  triggeredBy: string
+): Promise<{
   evaluatedCampaigns: number;
-  enqueuedJobs: number;
+  enqueuedPipelines: number;
+  pipelineIds: string[];
   taskIds: string[];
 }> {
-  await assertAgentOperational();
+  await assertAgentOperational(env);
 
-  const db = getDb();
   const today = todayIsoDate();
-  const snap = await db.collection(COLLECTIONS.CAMPAIGNS).where('enabled', '==', true).get();
+  const enabledCampaigns = await listCampaignRows(env.DB, true);
 
   let evaluatedCampaigns = 0;
+  const pipelineIds: string[] = [];
   const taskIds: string[] = [];
 
-  for (const doc of snap.docs) {
+  for (const campaign of enabledCampaigns) {
     evaluatedCampaigns += 1;
-    const campaign = { id: doc.id, ...(doc.data() as Omit<CampaignSchedule, 'id'>) };
 
     const countToday = campaign.lastResetDate === today ? campaign.postsPublishedToday || 0 : 0;
     if (countToday >= campaign.postsPerDay) {
@@ -86,41 +87,35 @@ export async function runSchedulerTick(triggeredBy: string): Promise<{
         ? campaign.targetKeywords[countToday % campaign.targetKeywords.length]
         : undefined;
 
-    const task = await enqueueTask({
-      type: 'GENERATE_AND_PUBLISH',
-      createdBy: triggeredBy,
-      payload: {
-        campaignId: campaign.id,
-        niche: campaign.niche,
-        seedKeyword,
-        blogId: campaign.blogId,
-        language: campaign.language,
-        publishAsDraft: campaign.publishAsDraft,
-        injectAds: campaign.injectAds,
-        preferredProvider: campaign.preferredProvider,
-        triggeredBy,
-      },
+    const { pipeline, initialTaskId } = await startAutonomousPipeline(env, {
+      campaignId: campaign.id,
+      niche: campaign.niche,
+      seedKeyword,
+      blogId: campaign.blogId,
+      language: campaign.language,
+      publishAsDraft: campaign.publishAsDraft,
+      injectAds: campaign.injectAds,
+      preferredProvider: campaign.preferredProvider,
+      triggeredBy,
+      idempotencyKey: `campaign:${campaign.id}:${today}:slot:${countToday}`,
     });
 
-    taskIds.push(task.id);
+    pipelineIds.push(pipeline.id);
+    taskIds.push(initialTaskId);
 
-    await doc.ref.update({
-      postsPublishedToday: countToday + 1,
-      lastResetDate: today,
-      lastRunAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
+    await updateCampaignQuotaRow(env.DB, campaign.id, countToday + 1, today);
   }
 
   logger.info('Autonomous scheduler tick completed', {
     evaluatedCampaigns,
-    enqueuedJobs: taskIds.length,
+    enqueuedPipelines: pipelineIds.length,
     triggeredBy,
   });
 
   return {
     evaluatedCampaigns,
-    enqueuedJobs: taskIds.length,
+    enqueuedPipelines: pipelineIds.length,
+    pipelineIds,
     taskIds,
   };
 }

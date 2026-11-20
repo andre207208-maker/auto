@@ -1,11 +1,11 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
-import { requireAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { AppVariables, requireAuth } from '../middleware/auth.js';
 import { auditSeo, buildArticleJsonLd, optimizeMetadataWithAI } from '../services/seoService.js';
+import { WorkerEnv } from '../types/index.js';
 
-const router = Router();
-router.use(requireAuth);
+const seoRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
+seoRoutes.use('*', requireAuth);
 
 const auditSchema = z.object({
   title: z.string().min(1).max(300),
@@ -31,31 +31,22 @@ const schemaBuilderInput = z.object({
   faqItems: z.array(z.object({ question: z.string(), answer: z.string() })).optional(),
 });
 
-router.post(
-  '/audit',
-  asyncHandler(async (req, res) => {
-    const input = auditSchema.parse(req.body);
-    const audit = auditSeo(input);
-    res.json({ audit });
-  })
-);
+seoRoutes.post('/audit', async (c) => {
+  const input = auditSchema.parse(await c.req.json());
+  const audit = auditSeo(input);
+  return c.json({ audit });
+});
 
-router.post(
-  '/optimize-metadata',
-  asyncHandler(async (req, res) => {
-    const input = optimizeSchema.parse(req.body);
-    const optimized = await optimizeMetadataWithAI(input);
-    res.json({ optimized });
-  })
-);
+seoRoutes.post('/optimize-metadata', async (c) => {
+  const input = optimizeSchema.parse(await c.req.json());
+  const optimized = await optimizeMetadataWithAI(c.env, input);
+  return c.json({ optimized });
+});
 
-router.post(
-  '/schema',
-  asyncHandler(async (req, res) => {
-    const input = schemaBuilderInput.parse(req.body);
-    const jsonLd = buildArticleJsonLd(input);
-    res.json({ jsonLd });
-  })
-);
+seoRoutes.post('/schema', async (c) => {
+  const input = schemaBuilderInput.parse(await c.req.json());
+  const jsonLd = buildArticleJsonLd(input);
+  return c.json({ jsonLd });
+});
 
-export default router;
+export default seoRoutes;

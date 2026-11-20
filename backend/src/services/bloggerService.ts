@@ -1,12 +1,16 @@
-import { env } from '../config/env.js';
-import { AppError } from '../middleware/errorHandler.js';
+import { WorkerEnv } from '../types/index.js';
+import { AppError } from '../utils/errors.js';
 import { isTransientHttpStatus, withRetry } from '../utils/retry.js';
 import { getGoogleOAuthAccessToken } from './googleAuthService.js';
 
 const BLOGGER_API_BASE = 'https://www.googleapis.com/blogger/v3';
 
-async function bloggerRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const accessToken = await getGoogleOAuthAccessToken();
+async function bloggerRequest<T>(
+  env: WorkerEnv,
+  path: string,
+  init: RequestInit = {}
+): Promise<T> {
+  const accessToken = await getGoogleOAuthAccessToken(env);
 
   return withRetry(
     async () => {
@@ -45,7 +49,7 @@ async function bloggerRequest<T>(path: string, init: RequestInit = {}): Promise<
   );
 }
 
-export function resolveBlogId(blogId?: string): string {
+export function resolveBlogId(env: WorkerEnv, blogId?: string): string {
   const resolved = blogId || env.DEFAULT_BLOGGER_BLOG_ID;
   if (!resolved) {
     throw new AppError(
@@ -57,22 +61,25 @@ export function resolveBlogId(blogId?: string): string {
   return resolved;
 }
 
-export async function listUserBlogs(): Promise<unknown> {
-  return bloggerRequest('/users/self/blogs');
+export async function listUserBlogs(env: WorkerEnv): Promise<unknown> {
+  return bloggerRequest(env, '/users/self/blogs');
 }
 
-export async function getBlogDetails(blogId?: string): Promise<unknown> {
-  const id = resolveBlogId(blogId);
-  return bloggerRequest(`/blogs/${encodeURIComponent(id)}`);
+export async function getBlogDetails(env: WorkerEnv, blogId?: string): Promise<unknown> {
+  const id = resolveBlogId(env, blogId);
+  return bloggerRequest(env, `/blogs/${encodeURIComponent(id)}`);
 }
 
-export async function listBlogPosts(params: {
-  blogId?: string;
-  maxResults?: number;
-  status?: 'live' | 'draft' | 'scheduled';
-  pageToken?: string;
-}): Promise<unknown> {
-  const id = resolveBlogId(params.blogId);
+export async function listBlogPosts(
+  env: WorkerEnv,
+  params: {
+    blogId?: string;
+    maxResults?: number;
+    status?: 'live' | 'draft' | 'scheduled';
+    pageToken?: string;
+  }
+): Promise<unknown> {
+  const id = resolveBlogId(env, params.blogId);
   const query = new URLSearchParams({
     maxResults: String(params.maxResults || 20),
     status: params.status || 'live',
@@ -80,7 +87,7 @@ export async function listBlogPosts(params: {
   if (params.pageToken) {
     query.set('pageToken', params.pageToken);
   }
-  return bloggerRequest(`/blogs/${encodeURIComponent(id)}/posts?${query.toString()}`);
+  return bloggerRequest(env, `/blogs/${encodeURIComponent(id)}/posts?${query.toString()}`);
 }
 
 export interface BloggerPostPayload {
@@ -101,10 +108,13 @@ export interface BloggerPostResponse {
   labels?: string[];
 }
 
-export async function publishBloggerPost(payload: BloggerPostPayload): Promise<BloggerPostResponse> {
-  const id = resolveBlogId(payload.blogId);
+export async function publishBloggerPost(
+  env: WorkerEnv,
+  payload: BloggerPostPayload
+): Promise<BloggerPostResponse> {
+  const id = resolveBlogId(env, payload.blogId);
   const query = payload.isDraft ? '?isDraft=true' : '';
-  return bloggerRequest<BloggerPostResponse>(`/blogs/${encodeURIComponent(id)}/posts${query}`, {
+  return bloggerRequest<BloggerPostResponse>(env, `/blogs/${encodeURIComponent(id)}/posts${query}`, {
     method: 'POST',
     body: JSON.stringify({
       kind: 'blogger#post',
@@ -116,15 +126,19 @@ export async function publishBloggerPost(payload: BloggerPostPayload): Promise<B
   });
 }
 
-export async function updateBloggerPost(params: {
-  blogId?: string;
-  postId: string;
-  title?: string;
-  content?: string;
-  labels?: string[];
-}): Promise<BloggerPostResponse> {
-  const id = resolveBlogId(params.blogId);
+export async function updateBloggerPost(
+  env: WorkerEnv,
+  params: {
+    blogId?: string;
+    postId: string;
+    title?: string;
+    content?: string;
+    labels?: string[];
+  }
+): Promise<BloggerPostResponse> {
+  const id = resolveBlogId(env, params.blogId);
   return bloggerRequest<BloggerPostResponse>(
+    env,
     `/blogs/${encodeURIComponent(id)}/posts/${encodeURIComponent(params.postId)}`,
     {
       method: 'PATCH',
@@ -137,9 +151,13 @@ export async function updateBloggerPost(params: {
   );
 }
 
-export async function deleteBloggerPost(blogId: string | undefined, postId: string): Promise<void> {
-  const id = resolveBlogId(blogId);
-  await bloggerRequest(`/blogs/${encodeURIComponent(id)}/posts/${encodeURIComponent(postId)}`, {
+export async function deleteBloggerPost(
+  env: WorkerEnv,
+  blogId: string | undefined,
+  postId: string
+): Promise<void> {
+  const id = resolveBlogId(env, blogId);
+  await bloggerRequest(env, `/blogs/${encodeURIComponent(id)}/posts/${encodeURIComponent(postId)}`, {
     method: 'DELETE',
   });
 }

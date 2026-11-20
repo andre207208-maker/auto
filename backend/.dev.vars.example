@@ -1,0 +1,38 @@
+# ==============================================================================
+# AUTOBLOGGER AI — Cloudflare Workers Local Secrets (.dev.vars)
+# Copy to .dev.vars for local `wrangler dev` testing.
+# In production, set these via Cloudflare Dashboard -> Workers & Pages -> Settings -> Variables and Secrets
+# or `npx wrangler secret put <SECRET_NAME>` — NEVER commit real secrets to GitHub.
+# ==============================================================================
+
+# API Authentication
+BACKEND_API_SECRET=change-this-to-a-strong-random-32-char-secret
+SCHEDULER_SHARED_SECRET=change-this-to-another-strong-random-secret
+FIREBASE_PROJECT_ID=
+
+# AI Providers (Configure at least one; failover uses AI_PROVIDER_ORDER)
+GEMINI_API_KEY=
+OPENROUTER_API_KEY=
+APINEX_API_KEY=
+CUSTOM_AI_API_KEY=
+CUSTOM_AI_BASE_URL=
+CUSTOM_AI_MODEL=
+
+# Tavily Web Research API
+TAVILY_API_KEY=
+
+# Google OAuth2 (Blogger API v3, Search Console, GA4 Data API)
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+GOOGLE_OAUTH_REFRESH_TOKEN=
+DEFAULT_BLOGGER_BLOG_ID=
+
+# Google Search Console & GA4
+GSC_SITE_URL=
+GA4_PROPERTY_ID=
+
+# Adsterra Publisher API
+ADSTERRA_API_KEY=
+
+# Optional FCM HTTP v1 Service Account JSON (for direct Android push alerts)
+FCM_SERVICE_ACCOUNT_JSON=

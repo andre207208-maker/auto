@@ -1,5 +1,10 @@
-import { AIProviderName, GeneratedArticle, ResearchTopicResult } from '../types/index.js';
-import { aiProviderManager } from './aiProviderManager.js';
+import {
+  AIProviderName,
+  GeneratedArticle,
+  ResearchTopicResult,
+  WorkerEnv,
+} from '../types/index.js';
+import { generateWithFailover } from './aiProviderManager.js';
 
 function stripMarkdownFences(raw: string): string {
   return raw
@@ -19,23 +24,26 @@ function toSlug(input: string): string {
     .slice(0, 75);
 }
 
-export async function generateArticle(params: {
-  topic: string;
-  primaryKeyword: string;
-  secondaryKeywords?: string[];
-  outline?: ResearchTopicResult['outline'];
-  language?: string;
-  tone?: string;
-  targetWordCount?: number;
-  preferredProvider?: AIProviderName;
-}): Promise<GeneratedArticle> {
+export async function generateArticle(
+  env: WorkerEnv,
+  params: {
+    topic: string;
+    primaryKeyword: string;
+    secondaryKeywords?: string[];
+    outline?: ResearchTopicResult['outline'];
+    language?: string;
+    tone?: string;
+    targetWordCount?: number;
+    preferredProvider?: AIProviderName;
+  }
+): Promise<GeneratedArticle> {
   const language = params.language || 'English';
   const tone = params.tone || 'Authoritative, helpful, and engaging';
-  const targetWordCount = params.targetWordCount || 1300;
+  const targetWordCount = params.targetWordCount || 1200;
 
   const outlineContext = params.outline?.length
     ? `Follow this structured outline:\n${JSON.stringify(params.outline, null, 2)}`
-    : 'Create a logical H2/H3 structure with an introduction, actionable body sections, comparison/checklist, and conclusion.';
+    : 'Create a logical H2/H3 structure with an introduction, actionable body sections, checklist, and conclusion.';
 
   const prompt = `
 Write a comprehensive, publication-ready blog post formatted in clean semantic HTML for Google Blogger.
@@ -65,7 +73,7 @@ Requirements:
 }
 `;
 
-  const response = await aiProviderManager.generateWithFailover({
+  const response = await generateWithFailover(env, {
     prompt,
     systemInstruction:
       'You are an elite long-form SEO editorial writer. Return valid JSON only. Ensure htmlContent is rich, well-structured, and ready to publish on Blogger.',

@@ -1,9 +1,6 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
-import { getDb } from '../config/firebase.js';
-import { requireAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
-import { COLLECTIONS } from '../services/firestoreService.js';
+import { AppVariables, requireAuth } from '../middleware/auth.js';
 import { getGA4TopPages, runGA4Report } from '../services/ga4Service.js';
 import {
   inspectUrl,
@@ -11,9 +8,10 @@ import {
   querySearchAnalytics,
   submitSitemap,
 } from '../services/searchConsoleService.js';
+import { WorkerEnv } from '../types/index.js';
 
-const router = Router();
-router.use(requireAuth);
+const analyticsRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
+analyticsRoutes.use('*', requireAuth);
 
 const gscQuerySchema = z.object({
   siteUrl: z.string().optional(),
@@ -32,76 +30,78 @@ const ga4QuerySchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
 });
 
-router.post(
-  '/gsc/query',
-  asyncHandler(async (req, res) => {
-    const input = gscQuerySchema.parse(req.body);
-    const data = await querySearchAnalytics(input);
-    res.json(data);
-  })
-);
+analyticsRoutes.post('/gsc/query', async (c) => {
+  const input = gscQuerySchema.parse(await c.req.json());
+  const data = await querySearchAnalytics(c.env, input);
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/gsc/sitemaps',
-  asyncHandler(async (req, res) => {
-    const siteUrl = typeof req.query.siteUrl === 'string' ? req.query.siteUrl : undefined;
-    const data = await listSitemaps(siteUrl);
-    res.json(data);
-  })
-);
+analyticsRoutes.get('/gsc/sitemaps', async (c) => {
+  const data = await listSitemaps(c.env, c.req.query('siteUrl'));
+  return c.json(data as Record<string, unknown>);
+});
 
-router.post(
-  '/gsc/sitemaps/submit',
-  asyncHandler(async (req, res) => {
-    const body = z.object({ feedpath: z.string().url(), siteUrl: z.string().optional() }).parse(req.body);
-    const result = await submitSitemap(body.feedpath, body.siteUrl);
-    res.json(result);
-  })
-);
+analyticsRoutes.post('/gsc/sitemaps/submit', async (c) => {
+  const body = z
+    .object({ feedpath: z.string().url(), siteUrl: z.string().optional() })
+    .parse(await c.req.json());
+  const result = await submitSitemap(c.env, body.feedpath, body.siteUrl);
+  return c.json(result);
+});
 
-router.post(
-  '/gsc/inspect',
-  asyncHandler(async (req, res) => {
-    const body = z.object({ inspectionUrl: z.string().url(), siteUrl: z.string().optional() }).parse(req.body);
-    const result = await inspectUrl(body.inspectionUrl, body.siteUrl);
-    res.json(result);
-  })
-);
+analyticsRoutes.post('/gsc/inspect', async (c) => {
+  const body = z
+    .object({ inspectionUrl: z.string().url(), siteUrl: z.string().optional() })
+    .parse(await c.req.json());
+  const result = await inspectUrl(c.env, body.inspectionUrl, body.siteUrl);
+  return c.json(result as Record<string, unknown>);
+});
 
-router.post(
-  '/ga4/report',
-  asyncHandler(async (req, res) => {
-    const input = ga4QuerySchema.parse(req.body);
-    const data = await runGA4Report(input);
-    res.json(data);
-  })
-);
+analyticsRoutes.post('/ga4/report', async (c) => {
+  const input = ga4QuerySchema.parse(await c.req.json());
+  const data = await runGA4Report(c.env, input);
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/ga4/top-pages',
-  asyncHandler(async (req, res) => {
-    const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : '7daysAgo';
-    const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : 'today';
-    const propertyId = typeof req.query.propertyId === 'string' ? req.query.propertyId : undefined;
-    const data = await getGA4TopPages({ propertyId, startDate, endDate });
-    res.json(data);
-  })
-);
+analyticsRoutes.get('/ga4/top-pages', async (c) => {
+  const startDate = c.req.query('startDate') || '7daysAgo';
+  const endDate = c.req.query('endDate') || 'today';
+  const propertyId = c.req.query('propertyId');
+  const data = await getGA4TopPages(c.env, { propertyId, startDate, endDate });
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/snapshots',
-  asyncHandler(async (req, res) => {
-    const limit = req.query.limit ? Math.min(Number(req.query.limit), 60) : 14;
-    const snap = await getDb()
-      .collection(COLLECTIONS.ANALYTICS_SNAPSHOTS)
-      .orderBy('generatedAt', 'desc')
-      .limit(limit)
-      .get();
+analyticsRoutes.get('/snapshots', async (c) => {
+  const limitParam = c.req.query('limit');
+  const limit = limitParam ? Math.min(Number(limitParam), 60) : 14;
+  const res = await c.env.DB.prepare(
+    `SELECT id, period, start_date, end_date, published_posts_count, sources_json, errors_json, generated_at
+     FROM analytics_snapshots ORDER BY generated_at DESC LIMIT ?`
+  )
+    .bind(limit)
+    .all<{
+      id: string;
+      period: string;
+      start_date: string;
+      end_date: string;
+      published_posts_count: number;
+      sources_json: string;
+      errors_json: string;
+      generated_at: string;
+    }>();
 
-    res.json({
-      snapshots: snap.docs.map((d) => ({ id: d.id, ...d.data() })),
-    });
-  })
-);
+  return c.json({
+    snapshots: res.results.map((r) => ({
+      id: r.id,
+      period: r.period,
+      startDate: r.start_date,
+      endDate: r.end_date,
+      publishedPostsCount: r.published_posts_count,
+      sources: JSON.parse(r.sources_json),
+      errors: JSON.parse(r.errors_json),
+      generatedAt: r.generated_at,
+    })),
+  });
+});
 
-export default router;
+export default analyticsRoutes;

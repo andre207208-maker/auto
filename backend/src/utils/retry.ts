@@ -14,8 +14,8 @@ export async function withRetry<T>(
 ): Promise<T> {
   const {
     maxAttempts = 3,
-    baseDelayMs = 400,
-    maxDelayMs = 8000,
+    baseDelayMs = 300,
+    maxDelayMs = 5000,
     operationName = 'operation',
     shouldRetry = () => true,
   } = options;
@@ -32,7 +32,7 @@ export async function withRetry<T>(
         break;
       }
 
-      const jitter = Math.floor(Math.random() * 150);
+      const jitter = Math.floor(Math.random() * 120);
       const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt - 1) + jitter);
 
       logger.warn(`${operationName} failed on attempt ${attempt}/${maxAttempts}, retrying in ${delay}ms`, {

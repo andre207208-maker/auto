@@ -1,15 +1,15 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
-import { requireAuth, requireSchedulerOrAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { AppVariables, requireAuth, requireSchedulerOrAuth } from '../middleware/auth.js';
 import {
   createOrUpdateCampaign,
   deleteCampaign,
   listCampaigns,
   runSchedulerTick,
 } from '../services/schedulerService.js';
+import { WorkerEnv } from '../types/index.js';
 
-const router = Router();
+const schedulerRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
 
 const campaignSchema = z.object({
   id: z.string().optional(),
@@ -26,42 +26,26 @@ const campaignSchema = z.object({
   targetKeywords: z.array(z.string().max(120)).default([]),
 });
 
-router.get(
-  '/campaigns',
-  requireAuth,
-  asyncHandler(async (_req, res) => {
-    const campaigns = await listCampaigns();
-    res.json({ campaigns });
-  })
-);
+schedulerRoutes.get('/campaigns', requireAuth, async (c) => {
+  const campaigns = await listCampaigns(c.env);
+  return c.json({ campaigns });
+});
 
-router.post(
-  '/campaigns',
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const input = campaignSchema.parse(req.body);
-    const campaign = await createOrUpdateCampaign(input);
-    res.status(201).json({ campaign });
-  })
-);
+schedulerRoutes.post('/campaigns', requireAuth, async (c) => {
+  const input = campaignSchema.parse(await c.req.json());
+  const campaign = await createOrUpdateCampaign(c.env, input);
+  return c.json({ campaign }, 201);
+});
 
-router.delete(
-  '/campaigns/:id',
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    await deleteCampaign(req.params.id);
-    res.status(204).send();
-  })
-);
+schedulerRoutes.delete('/campaigns/:id', requireAuth, async (c) => {
+  const id = c.req.param('id') || '';
+  await deleteCampaign(c.env, id);
+  return c.body(null, 204);
+});
 
-// Invoked by Google Cloud Scheduler (or manually by authenticated user)
-router.post(
-  '/tick',
-  requireSchedulerOrAuth,
-  asyncHandler(async (req, res) => {
-    const result = await runSchedulerTick(req.principal?.uid || 'cloud-scheduler');
-    res.json(result);
-  })
-);
+schedulerRoutes.post('/tick', requireSchedulerOrAuth, async (c) => {
+  const result = await runSchedulerTick(c.env, c.get('principal')?.uid || 'scheduler');
+  return c.json(result);
+});
 
-export default router;
+export default schedulerRoutes;

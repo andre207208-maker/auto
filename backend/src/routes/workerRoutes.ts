@@ -1,37 +1,26 @@
-import { Router } from 'express';
-import { requireAuth, requireSchedulerOrAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
-import { listRecentSystemLogs } from '../services/firestoreService.js';
+import { Hono } from 'hono';
+import { listRecentSystemLogs } from '../db/repositories.js';
+import { AppVariables, requireAuth, requireSchedulerOrAuth } from '../middleware/auth.js';
+import { WorkerEnv } from '../types/index.js';
 import { runAnalyticsSyncJob } from '../workers/analyticsWorker.js';
 
-const router = Router();
+const workerRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
 
-router.post(
-  '/analytics/daily',
-  requireSchedulerOrAuth,
-  asyncHandler(async (_req, res) => {
-    const summary = await runAnalyticsSyncJob('daily');
-    res.json({ summary });
-  })
-);
+workerRoutes.post('/analytics/daily', requireSchedulerOrAuth, async (c) => {
+  const summary = await runAnalyticsSyncJob(c.env, 'daily');
+  return c.json({ summary });
+});
 
-router.post(
-  '/analytics/weekly',
-  requireSchedulerOrAuth,
-  asyncHandler(async (_req, res) => {
-    const summary = await runAnalyticsSyncJob('weekly');
-    res.json({ summary });
-  })
-);
+workerRoutes.post('/analytics/weekly', requireSchedulerOrAuth, async (c) => {
+  const summary = await runAnalyticsSyncJob(c.env, 'weekly');
+  return c.json({ summary });
+});
 
-router.get(
-  '/logs',
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const limit = req.query.limit ? Number(req.query.limit) : 50;
-    const logs = await listRecentSystemLogs(limit);
-    res.json({ logs });
-  })
-);
+workerRoutes.get('/logs', requireAuth, async (c) => {
+  const limitParam = c.req.query('limit');
+  const limit = limitParam ? Number(limitParam) : 50;
+  const logs = await listRecentSystemLogs(c.env.DB, limit);
+  return c.json({ logs });
+});
 
-export default router;
+export default workerRoutes;

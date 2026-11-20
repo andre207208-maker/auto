@@ -10,17 +10,20 @@ import java.net.URL
 
 /**
  * Drop-in verifier for the Android Setup Wizard.
- * Performs a real GET /health request against the user-provided Cloud Run URL
- * and only reports success when HTTP 200 and JSON status == "ok" are returned.
+ * Compatible with Cloudflare Workers (*.workers.dev) and any HTTPS backend URL.
+ * Performs a real GET /health request and only reports success when HTTP 200
+ * and JSON status == "ok" are returned.
  */
 data class BackendVerificationResult(
     val verified: Boolean,
     val normalizedBaseUrl: String,
     val statusCode: Int? = null,
     val serviceName: String? = null,
+    val runtime: String? = null,
     val timestamp: String? = null,
     val agentStatus: String? = null,
-    val firebaseConnected: Boolean? = null,
+    val dbConnected: Boolean? = null,
+    val queueConfigured: Boolean? = null,
     val errorMessage: String? = null
 )
 
@@ -74,9 +77,15 @@ object CloudRunHealthVerifier {
                 val json = JSONObject(body)
                 val status = json.optString("status", "")
                 val service = json.optString("service", "")
+                val runtime = json.optString("runtime", "cloudflare-workers")
                 val timestamp = json.optString("timestamp", "")
                 val agentStatus = json.optString("agentStatus", "unknown")
-                val firebaseConnected = json.optBoolean("firebaseConnected", false)
+                val dbConnected = if (json.has("dbConnected")) {
+                    json.optBoolean("dbConnected", false)
+                } else {
+                    json.optBoolean("firebaseConnected", false)
+                }
+                val queueConfigured = json.optBoolean("queueConfigured", false)
 
                 if (status != "ok" || service.isBlank()) {
                     return@withContext BackendVerificationResult(
@@ -92,9 +101,11 @@ object CloudRunHealthVerifier {
                     normalizedBaseUrl = baseUrl,
                     statusCode = code,
                     serviceName = service,
+                    runtime = runtime,
                     timestamp = timestamp,
                     agentStatus = agentStatus,
-                    firebaseConnected = firebaseConnected
+                    dbConnected = dbConnected,
+                    queueConfigured = queueConfigured
                 )
             } catch (e: Exception) {
                 BackendVerificationResult(

@@ -1,11 +1,11 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
-import { requireAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
-import { aiProviderManager } from '../services/aiProviderManager.js';
+import { AppVariables, requireAuth } from '../middleware/auth.js';
+import { generateWithFailover, getProvidersHealth } from '../services/aiProviderManager.js';
+import { WorkerEnv } from '../types/index.js';
 
-const router = Router();
-router.use(requireAuth);
+const aiRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
+aiRoutes.use('*', requireAuth);
 
 const generateSchema = z.object({
   prompt: z.string().min(1).max(25000),
@@ -16,22 +16,15 @@ const generateSchema = z.object({
   maxTokens: z.number().int().min(64).max(16000).optional(),
 });
 
-router.get(
-  '/providers/health',
-  asyncHandler(async (_req, res) => {
-    res.json({
-      providers: aiProviderManager.getProvidersHealth(),
-    });
-  })
-);
+aiRoutes.get('/providers/health', async (c) => {
+  const providers = await getProvidersHealth(c.env);
+  return c.json({ providers });
+});
 
-router.post(
-  '/generate',
-  asyncHandler(async (req, res) => {
-    const input = generateSchema.parse(req.body);
-    const result = await aiProviderManager.generateWithFailover(input);
-    res.json(result);
-  })
-);
+aiRoutes.post('/generate', async (c) => {
+  const input = generateSchema.parse(await c.req.json());
+  const result = await generateWithFailover(c.env, input);
+  return c.json(result);
+});
 
-export default router;
+export default aiRoutes;

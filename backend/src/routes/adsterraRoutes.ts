@@ -1,7 +1,6 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
-import { requireAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { AppVariables, requireAuth } from '../middleware/auth.js';
 import {
   deleteAdConfig,
   getAdsterraDomains,
@@ -11,9 +10,10 @@ import {
   listAdConfigs,
   upsertAdConfig,
 } from '../services/adsterraService.js';
+import { WorkerEnv } from '../types/index.js';
 
-const router = Router();
-router.use(requireAuth);
+const adsterraRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
+adsterraRoutes.use('*', requireAuth);
 
 const adConfigSchema = z.object({
   id: z.string().min(1).max(80),
@@ -30,78 +30,51 @@ const adConfigSchema = z.object({
   insertAfterParagraph: z.number().int().min(1).max(50).optional(),
 });
 
-router.get(
-  '/domains',
-  asyncHandler(async (_req, res) => {
-    const data = await getAdsterraDomains();
-    res.json(data);
-  })
-);
+adsterraRoutes.get('/domains', async (c) => {
+  const data = await getAdsterraDomains(c.env);
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/placements',
-  asyncHandler(async (_req, res) => {
-    const data = await getAdsterraPlacements();
-    res.json(data);
-  })
-);
+adsterraRoutes.get('/placements', async (c) => {
+  const data = await getAdsterraPlacements(c.env);
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/stats',
-  asyncHandler(async (req, res) => {
-    const startDate =
-      typeof req.query.startDate === 'string'
-        ? req.query.startDate
-        : new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
-    const finishDate =
-      typeof req.query.finishDate === 'string'
-        ? req.query.finishDate
-        : new Date().toISOString().slice(0, 10);
-    const groupBy =
-      req.query.groupBy === 'domain' ||
-      req.query.groupBy === 'placement' ||
-      req.query.groupBy === 'country'
-        ? req.query.groupBy
-        : 'date';
-    const domainId = typeof req.query.domainId === 'string' ? req.query.domainId : undefined;
+adsterraRoutes.get('/stats', async (c) => {
+  const startDate =
+    c.req.query('startDate') || new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
+  const finishDate = c.req.query('finishDate') || new Date().toISOString().slice(0, 10);
+  const groupQuery = c.req.query('groupBy');
+  const groupBy =
+    groupQuery === 'domain' || groupQuery === 'placement' || groupQuery === 'country'
+      ? groupQuery
+      : 'date';
+  const domainId = c.req.query('domainId');
 
-    const data = await getAdsterraStats({ startDate, finishDate, groupBy, domainId });
-    res.json(data);
-  })
-);
+  const data = await getAdsterraStats(c.env, { startDate, finishDate, groupBy, domainId });
+  return c.json(data as Record<string, unknown>);
+});
 
-router.get(
-  '/configs',
-  asyncHandler(async (_req, res) => {
-    const configs = await listAdConfigs();
-    res.json({ configs });
-  })
-);
+adsterraRoutes.get('/configs', async (c) => {
+  const configs = await listAdConfigs(c.env);
+  return c.json({ configs });
+});
 
-router.post(
-  '/configs',
-  asyncHandler(async (req, res) => {
-    const input = adConfigSchema.parse(req.body);
-    const saved = await upsertAdConfig(input);
-    res.status(201).json({ config: saved });
-  })
-);
+adsterraRoutes.post('/configs', async (c) => {
+  const input = adConfigSchema.parse(await c.req.json());
+  const config = await upsertAdConfig(c.env, input);
+  return c.json({ config }, 201);
+});
 
-router.delete(
-  '/configs/:id',
-  asyncHandler(async (req, res) => {
-    await deleteAdConfig(req.params.id);
-    res.status(204).send();
-  })
-);
+adsterraRoutes.delete('/configs/:id', async (c) => {
+  await deleteAdConfig(c.env, c.req.param('id'));
+  return c.body(null, 204);
+});
 
-router.post(
-  '/preview-inject',
-  asyncHandler(async (req, res) => {
-    const body = z.object({ html: z.string().min(1) }).parse(req.body);
-    const injectedHtml = await injectAdsIntoPostHtml(body.html);
-    res.json({ html: injectedHtml });
-  })
-);
+adsterraRoutes.post('/preview-inject', async (c) => {
+  const body = z.object({ html: z.string().min(1) }).parse(await c.req.json());
+  const html = await injectAdsIntoPostHtml(c.env, body.html);
+  return c.json({ html });
+});
 
-export default router;
+export default adsterraRoutes;

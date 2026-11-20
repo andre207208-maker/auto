@@ -21,61 +21,62 @@ interface HealthResponse {
   status?: string;
   service?: string;
   version?: string;
+  runtime?: string;
   environment?: string;
-  uptimeSeconds?: number;
   timestamp?: string;
-  firebaseConnected?: boolean;
+  dbConnected?: boolean;
+  queueConfigured?: boolean;
+  r2Configured?: boolean;
   agentStatus?: string;
 }
 
 const CAPABILITIES = [
-  { id: '01', name: 'GET /health Probe', module: 'routes/healthRoutes.ts', desc: 'Cloud Run liveness & Android Setup Wizard verification' },
-  { id: '02', name: 'Firebase & API Key Auth', module: 'middleware/auth.ts', desc: 'Firebase ID token verifyIdToken + timing-safe X-API-Key & Scheduler secret' },
-  { id: '03', name: 'Blogger API v3', module: 'services/bloggerService.ts', desc: 'OAuth2 token refresh + blog/post CRUD & draft publishing' },
-  { id: '04', name: 'Multi-AI Provider Manager', module: 'services/aiProviderManager.ts', desc: 'Gemini (@google/genai), OpenRouter, API-NEX & Custom OpenAI-compatible' },
-  { id: '05', name: 'Automatic AI Failover', module: 'services/aiProviderManager.ts', desc: 'Circuit breaker, cooldown tracking & Firestore provider health state' },
-  { id: '06', name: 'Content Research & Gen', module: 'services/researchService.ts', desc: 'Keyword/outline research + long-form semantic Blogger HTML generation' },
-  { id: '07', name: 'SEO Optimization & Schema', module: 'services/seoService.ts', desc: 'Readability, keyword density audit, AI metadata & JSON-LD Graph' },
-  { id: '08', name: 'Google Search Console', module: 'services/searchConsoleService.ts', desc: 'Search Analytics queries, sitemaps & URL Indexing inspection' },
-  { id: '09', name: 'Google Analytics 4', module: 'services/ga4Service.ts', desc: 'GA4 Data API v1beta reports & top-performing pages' },
-  { id: '10', name: 'Autonomous Scheduler', module: 'services/schedulerService.ts', desc: 'Campaign daily quotas & Cloud Scheduler /tick orchestration' },
-  { id: '11', name: 'Adsterra Ad Manager', module: 'services/adsterraService.ts', desc: 'Publisher API v3 stats + paragraph-safe HTML ad slot injection' },
-  { id: '12', name: 'Persistent Task Queue', module: 'services/taskQueueService.ts', desc: 'Firestore task persistence, Cloud Tasks dispatch & exponential backoff' },
-  { id: '13', name: 'FCM Push Notifications', module: 'services/fcmService.ts', desc: 'Android device token registry & topic/multicast alerts' },
-  { id: '14', name: 'Daily & Weekly Analytics', module: 'workers/analyticsWorker.ts', desc: 'Aggregated GA4, GSC, Adsterra & Blogger snapshots' },
-  { id: '15', name: 'Pause / Resume / E-Stop', module: 'services/agentControlService.ts', desc: 'Firestore-backed control plane cancelling pending tasks on E-Stop' },
-  { id: '16', name: 'Firestore Persistence', module: 'config/firebase.ts', desc: 'Application Default Credentials (ADC) & multi-collection schema' },
-  { id: '17', name: 'Structured Cloud Logging', module: 'utils/logger.ts', desc: 'Cloud Logging JSON severity format with automatic secret redaction' },
+  { id: '01', name: 'Workers Fetch + GET /health', module: 'index.ts / healthRoutes.ts', desc: 'Zero-cold-start Edge Worker handler & Android Setup Wizard /health verification' },
+  { id: '02', name: 'WebCrypto Auth & API Key', module: 'middleware/auth.ts', desc: 'Firebase JWT JWKS verify via crypto.subtle + timing-safe X-API-Key & Scheduler secret' },
+  { id: '03', name: 'Cloudflare D1 Persistence', module: 'db/repositories.ts', desc: '12 relational SQLite tables via DB binding & SQL migrations (0001_initial_schema.sql)' },
+  { id: '04', name: 'Cloudflare Queues Pipeline', module: 'workers/publishWorker.ts', desc: '3-stage async Queue chain (Research -> Generate -> Publish) for Free plan limits' },
+  { id: '05', name: 'Cloudflare Cron Triggers', module: 'workers/taskWorker.ts', desc: 'Scheduled */15 scheduler/retries + daily & weekly analytics aggregation' },
+  { id: '06', name: 'AI Provider Failover', module: 'services/aiProviderManager.ts', desc: 'Gemini REST, OpenRouter, API-NEX & Custom OpenAI with D1 circuit breaker' },
+  { id: '07', name: 'Tavily + AI Research', module: 'services/researchService.ts', desc: 'Live Tavily Web Search API grounding + structured keyword & outline synthesis' },
+  { id: '08', name: 'SEO Audit & JSON-LD', module: 'services/seoService.ts', desc: 'Keyword density, heading audit, AI meta rewrite & BlogPosting/FAQPage Schema' },
+  { id: '09', name: 'Blogger OAuth2 & API v3', module: 'services/bloggerService.ts', desc: 'D1-cached Google OAuth token refresh + blog/post CRUD & draft publishing' },
+  { id: '10', name: 'Search Console & GA4', module: 'services/searchConsoleService.ts', desc: 'Search Analytics, sitemap submission, URL Inspection & GA4 Data API reports' },
+  { id: '11', name: 'Adsterra Ad Injection', module: 'services/adsterraService.ts', desc: 'Publisher API v3 stats + D1 slot configs & paragraph-safe HTML injection' },
+  { id: '12', name: 'Idempotency & Retries', module: 'services/taskQueueService.ts', desc: 'Unique idempotency_key deduplication, atomic claim, backoff & dead-letter queue' },
+  { id: '13', name: 'Pause / Resume / E-Stop', module: 'services/agentControlService.ts', desc: 'D1-backed control plane cancelling pending tasks & pipelines on Emergency Stop' },
+  { id: '14', name: 'FCM & D1 Notifications', module: 'services/fcmService.ts', desc: 'WebCrypto FCM HTTP v1 push delivery + persistent D1 notification inbox' },
+  { id: '15', name: 'Optional Cloudflare R2', module: 'services/r2MediaService.ts', desc: 'MEDIA_BUCKET binding for HTML article backups and media asset storage' },
+  { id: '16', name: 'GitHub Actions CI/CD', module: '.github/workflows/', desc: 'Automated lint, Vitest, D1 migration apply & wrangler deploy via GitHub Secrets' },
 ];
 
 const KOTLIN_SNIPPET = `// Drop into your Android Setup Wizard: /backend/android-integration/CloudRunHealthVerifier.kt
-val result = CloudRunHealthVerifier.verifyBackend(userEnteredUrl)
+val result = CloudRunHealthVerifier.verifyBackend(userEnteredWorkerUrl)
 if (result.verified) {
-    // Save result.normalizedBaseUrl and proceed
+    // Save result.normalizedBaseUrl (e.g. https://autoblogger-ai-backend.<user>.workers.dev)
 } else {
     // Show result.errorMessage — never accept unverified URLs
 }`;
 
 const BENGALI_STEPS = [
   {
-    step: '১. GitHub রিপোজিটরি',
-    detail: 'মোবাইলে github.com থেকে একটি Private repository তৈরি করে /backend ফোল্ডারের সব ফাইল (Dockerfile, package.json, tsconfig.json, src/) আপলোড করুন। .env বা আসল API Key কখনো আপলোড করবেন না।',
+    step: '১. Cloudflare D1 ডাটাবেস তৈরি (Dashboard থেকে)',
+    detail: 'dash.cloudflare.com-এ লগইন করে Storage & Databases > D1 SQL Database > Create Database ("autoblogger-db") তৈরি করুন। প্রাপ্ত Database ID-টি backend/wrangler.jsonc ফাইলে বসান এবং migrations/0001_initial_schema.sql রান করুন।',
   },
   {
-    step: '২. Google Cloud APIs চালু করুন',
-    detail: 'Desktop mode-এ console.cloud.google.com খুলে Cloud Run, Cloud Build, Artifact Registry, Firestore, Cloud Scheduler, Cloud Tasks, FCM, Blogger v3, Search Console ও GA4 Data API Enable করুন।',
+    step: '২. Cloudflare Queues ও R2 Bucket তৈরি',
+    detail: 'Storage & Databases > Queues থেকে "autoblogger-tasks" ও "autoblogger-tasks-dlq" তৈরি করুন। ইমেজ/HTML ব্যাকআপের জন্য R2 থেকে "autoblogger-media" Bucket তৈরি করুন।',
   },
   {
-    step: '৩. Firebase & IAM কনফিগারেশন',
-    detail: 'console.firebase.google.com থেকে একই GCP প্রজেক্টে Firebase ও Firestore (Production mode) চালু করুন। Cloud Run সার্ভিস অ্যাকাউন্টকে roles/datastore.user, roles/firebasecloudmessaging.admin ও roles/cloudtasks.enqueuer দিন।',
+    step: '৩. Cloudflare Workers-এ GitHub সংযুক্ত করুন',
+    detail: 'Compute (Workers) > Workers & Pages > Create > Connect to Git সিলেক্ট করে আপনার GitHub রিপোজিটরি দিন (Path: backend, Deploy: npx wrangler deploy) অথবা .github/workflows/deploy-cloudflare-worker.yml ব্যবহার করুন।',
   },
   {
-    step: '৪. Cloud Run-এ ডিপ্লয় করুন',
-    detail: 'Cloud Run > Deploy Container > Continuously deploy from repository > GitHub সিলেক্ট করে Dockerfile দিয়ে পোর্ট 8080-এ ডিপ্লয় করুন এবং সব Environment Variables দিন।',
+    step: '৪. Cloudflare Secrets যোগ করুন',
+    detail: 'Worker Settings > Variables and Secrets থেকে BACKEND_API_SECRET, SCHEDULER_SHARED_SECRET, GEMINI_API_KEY, TAVILY_API_KEY, GOOGLE_OAUTH_* ও ADSTERRA_API_KEY সেট করুন।',
   },
   {
-    step: '৫. Cloud Scheduler ও Android Setup Wizard',
-    detail: 'ডিপ্লয়ের পর পাওয়া https://...run.app URL-টি Android Setup Wizard-এ বসান। অ্যাপটি GET /health যাচাই করে status: "ok" পেলেই সংযোগ সম্পন্ন হবে।',
+    step: '৫. Worker URL সংগ্রহ ও Android Setup Wizard-এ যাচাই',
+    detail: 'ডিপ্লয় শেষে পাওয়া https://autoblogger-ai-backend.<subdomain>.workers.dev URL-টি Android Setup Wizard-এ দিন। অ্যাপটি GET /health যাচাই করে status: "ok" ও dbConnected: true পেলেই সংযোগ সম্পন্ন হবে।',
   },
 ];
 
@@ -102,7 +103,7 @@ export default function App() {
       setVerifyState({
         checked: true,
         verified: false,
-        error: 'Enter your deployed Google Cloud Run HTTPS URL first (no fake URLs are prefilled).',
+        error: 'Enter your deployed Cloudflare Worker HTTPS URL first (no fake URLs are prefilled).',
       });
       return;
     }
@@ -111,7 +112,7 @@ export default function App() {
       setVerifyState({
         checked: true,
         verified: false,
-        error: 'URL must start with https:// (or http:// for local testing).',
+        error: 'URL must start with https:// (or http:// for local wrangler dev testing).',
       });
       return;
     }
@@ -158,7 +159,7 @@ export default function App() {
         latencyMs,
         error:
           err instanceof Error
-            ? `Request failed: ${err.message}. Confirm the Cloud Run service is deployed, allows unauthenticated /health, and has CORS enabled.`
+            ? `Request failed: ${err.message}. Confirm the Cloudflare Worker is deployed and reachable.`
             : 'Network error contacting /health.',
       });
     } finally {
@@ -177,15 +178,15 @@ export default function App() {
       <header className="border-b border-slate-800/80 bg-slate-950/90 backdrop-blur">
         <div className="mx-auto flex max-w-6xl flex-col gap-4 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-orange-500/30 bg-orange-500/10 text-orange-400">
               <Server className="h-5 w-5" />
             </div>
             <div>
               <h1 className="text-lg font-semibold tracking-tight text-white">
-                AUTOBLOGGER AI — Cloud Run Backend
+                AUTOBLOGGER AI — Cloudflare Workers Backend
               </h1>
               <p className="text-xs text-slate-400">
-                Production <code className="text-emerald-400">/backend</code> Service &amp; Live{' '}
+                Workers + D1 + Queues + Cron + R2 (<code className="text-orange-400">/backend</code>) &amp; Live{' '}
                 <code className="text-slate-300">GET /health</code> Verifier
               </p>
             </div>
@@ -193,12 +194,12 @@ export default function App() {
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="inline-flex items-center gap-1.5 rounded-md border border-slate-800 bg-slate-900 px-2.5 py-1 text-slate-300">
-              <Cloud className="h-3.5 w-3.5 text-sky-400" />
-              Cloud Run Ready
+              <Cloud className="h-3.5 w-3.5 text-orange-400" />
+              Cloudflare Free Architecture
             </span>
             <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">
               <AlertTriangle className="h-3.5 w-3.5" />
-              Not Deployed Yet (Deploy via GitHub)
+              Not Deployed Yet (Deploy via GitHub / Dashboard)
             </span>
           </div>
         </div>
@@ -208,8 +209,8 @@ export default function App() {
         <nav className="mb-8 flex flex-wrap gap-2 border-b border-slate-800 pb-3">
           {[
             { id: 'verifier', label: 'Live /health Verifier', icon: Activity },
-            { id: 'architecture', label: 'Backend Modules (17/17)', icon: Database },
-            { id: 'bengali-guide', label: 'বাংলা ডিপ্লয়মেন্ট গাইড', icon: FileText },
+            { id: 'architecture', label: 'Workers Modules (16/16)', icon: Database },
+            { id: 'bengali-guide', label: 'বাংলা Cloudflare গাইড', icon: FileText },
             { id: 'android-kotlin', label: 'Android Setup Integration', icon: Smartphone },
           ].map((tab) => {
             const Icon = tab.icon;
@@ -221,7 +222,7 @@ export default function App() {
                 onClick={() => setActiveTab(tab.id as TabKey)}
                 className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition ${
                   active
-                    ? 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/40'
+                    ? 'bg-orange-500/15 text-orange-300 ring-1 ring-orange-500/40'
                     : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
                 }`}
               >
@@ -237,41 +238,41 @@ export default function App() {
             <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6 lg:col-span-3">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-base font-semibold text-white">
-                  Verify Deployed Cloud Run Backend URL
+                  Verify Deployed Cloudflare Worker URL
                 </h2>
                 <span className="font-mono text-xs text-slate-400">GET /health</span>
               </div>
               <p className="mb-5 text-sm leading-relaxed text-slate-400">
-                Enter your live Google Cloud Run Service URL after deploying{' '}
+                Enter your live Cloudflare Workers URL after deploying{' '}
                 <code className="rounded bg-slate-800 px-1.5 py-0.5 text-xs text-slate-200">
                   /backend
                 </code>
                 . This tool executes a real <code className="text-slate-300">GET /health</code>{' '}
-                request and only confirms verification when the server returns HTTP 200 with{' '}
+                request and only confirms verification when the Worker returns HTTP 200 with{' '}
                 <code className="text-emerald-400">status: &quot;ok&quot;</code>.
               </p>
 
               <form onSubmit={handleVerifyHealth} className="space-y-4">
                 <div>
                   <label
-                    htmlFor="cloud-run-url"
+                    htmlFor="worker-url"
                     className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400"
                   >
-                    Cloud Run Service URL
+                    Cloudflare Worker URL
                   </label>
                   <div className="flex flex-col gap-3 sm:flex-row">
                     <input
-                      id="cloud-run-url"
+                      id="worker-url"
                       type="url"
                       value={backendUrl}
                       onChange={(e) => setBackendUrl(e.target.value)}
-                      placeholder="https://autoblogger-ai-backend-xxxxxxxxxx-el.a.run.app"
-                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 font-mono text-sm text-white placeholder-slate-600 focus:border-emerald-500 focus:outline-none"
+                      placeholder="https://autoblogger-ai-backend.<subdomain>.workers.dev"
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 font-mono text-sm text-white placeholder-slate-600 focus:border-orange-500 focus:outline-none"
                     />
                     <button
                       type="submit"
                       disabled={verifying}
-                      className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:opacity-60"
+                      className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-orange-500 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-orange-400 disabled:opacity-60"
                     >
                       <RefreshCw className={`h-4 w-4 ${verifying ? 'animate-spin' : ''}`} />
                       {verifying ? 'Checking...' : 'Verify Backend'}
@@ -333,27 +334,25 @@ export default function App() {
             <aside className="space-y-4 lg:col-span-2">
               <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
                 <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
-                  <ShieldCheck className="h-4 w-4 text-emerald-400" />
-                  Cloud Run Contract
+                  <ShieldCheck className="h-4 w-4 text-orange-400" />
+                  Cloudflare Free Plan Guardrails
                 </div>
                 <ul className="space-y-2.5 text-xs text-slate-300">
                   <li className="flex items-start gap-2">
-                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    Listens on <code className="text-slate-200">process.env.PORT</code> (default{' '}
-                    <code className="text-slate-200">8080</code>)
+                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-orange-400" />
+                    Zero Express / Node.js server deps — pure Hono + Web Standards
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    Handles <code className="text-slate-200">SIGTERM</code> /{' '}
-                    <code className="text-slate-200">SIGINT</code> graceful shutdown
+                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-orange-400" />
+                    Long AI pipelines split into 3 async Queue stages in D1
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    Stateless containers; state &amp; jobs persisted in Firestore
+                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-orange-400" />
+                    Idempotency keys &amp; atomic SQL claims prevent duplicate posts
                   </li>
                   <li className="flex items-start gap-2">
-                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    Secrets validated with Zod and never exposed in responses or logs
+                    <span className="mt-1 h-1.5 w-1.5 rounded-full bg-orange-400" />
+                    Secrets managed via Cloudflare Secrets &amp; never hardcoded
                   </li>
                 </ul>
               </div>
@@ -361,12 +360,12 @@ export default function App() {
               <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
                 <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-white">
                   <Lock className="h-4 w-4 text-sky-400" />
-                  Workspace Inspection Note
+                  Android Compatibility Note
                 </div>
                 <p className="text-xs leading-relaxed text-slate-400">
-                  No existing Android project files (<code>app/</code>, <code>build.gradle</code>,{' '}
-                  <code>.kt</code>) were present in this repository workspace. A drop-in Kotlin
-                  verifier is ready at{' '}
+                  All REST paths (<code>/health</code>, <code>/api/v1/agent/*</code>,{' '}
+                  <code>/api/v1/blogger/*</code>, <code>/api/v1/content/*</code>) and{' '}
+                  <code>X-API-Key</code> / Firebase Bearer auth remain preserved. Drop-in verifier:{' '}
                   <code className="text-slate-200">
                     /backend/android-integration/CloudRunHealthVerifier.kt
                   </code>
@@ -381,10 +380,10 @@ export default function App() {
           <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-base font-semibold text-white">
-                Implemented Backend Capabilities (`/backend/src`)
+                Migrated Cloudflare Workers Modules (`/backend/src`)
               </h2>
-              <span className="font-mono text-xs text-emerald-400">
-                TypeScript + Express + Firebase Admin + Cloud Tasks
+              <span className="font-mono text-xs text-orange-400">
+                Workers + Hono + D1 + Queues + Cron + R2
               </span>
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -394,7 +393,7 @@ export default function App() {
                   className="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
                 >
                   <div className="mb-1.5 flex items-center justify-between">
-                    <span className="font-mono text-xs text-emerald-400">#{cap.id}</span>
+                    <span className="font-mono text-xs text-orange-400">#{cap.id}</span>
                     <span className="font-mono text-[11px] text-slate-500">{cap.module}</span>
                   </div>
                   <h3 className="text-sm font-semibold text-white">{cap.name}</h3>
@@ -409,7 +408,7 @@ export default function App() {
           <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-base font-semibold text-white">
-                মোবাইল ফোন ও GitHub ব্যবহার করে Google Cloud Run ডিপ্লয়মেন্ট গাইড
+                Cloudflare Workers Dashboard-এর মাধ্যমে ডিপ্লয়মেন্ট গাইড
               </h2>
               <span className="font-mono text-xs text-slate-400">
                 /backend/DEPLOYMENT_GUIDE_BN.md
@@ -421,16 +420,15 @@ export default function App() {
                   key={item.step}
                   className="rounded-lg border border-slate-800 bg-slate-950/70 p-4"
                 >
-                  <h3 className="text-sm font-semibold text-emerald-300">{item.step}</h3>
+                  <h3 className="text-sm font-semibold text-orange-300">{item.step}</h3>
                   <p className="mt-1.5 text-sm leading-relaxed text-slate-300">{item.detail}</p>
                 </div>
               ))}
             </div>
             <p className="mt-5 text-xs text-slate-400">
-              সম্পূর্ণ বিস্তারিত কমান্ড, IAM Role তালিকা, Environment Variables টেবিল এবং ৪টি Cloud
-              Scheduler জবের কনফিগারেশন{' '}
-              <code className="text-slate-200">/backend/DEPLOYMENT_GUIDE_BN.md</code> ফাইলে সংরক্ষিত
-              আছে।
+              সম্পূর্ণ বিস্তারিত নির্দেশনা, Secrets তালিকা, GitHub Actions কনফিগারেশন এবং D1 মাইগ্রেশন
+              ধাপসমূহ <code className="text-slate-200">/backend/DEPLOYMENT_GUIDE_BN.md</code> ফাইলে
+              দেওয়া আছে।
             </p>
           </section>
         )}
@@ -444,7 +442,7 @@ export default function App() {
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-400">
                   Full Kotlin implementation saved at{' '}
-                  <code className="text-emerald-400">
+                  <code className="text-orange-400">
                     /backend/android-integration/CloudRunHealthVerifier.kt
                   </code>
                 </p>
@@ -479,13 +477,13 @@ export default function App() {
             </div>
 
             <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-xs text-slate-300">
-              <Terminal className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+              <Terminal className="mt-0.5 h-4 w-4 shrink-0 text-orange-400" />
               <p className="leading-relaxed">
-                <strong>Important:</strong> Never hardcode a placeholder or fake Cloud Run URL.
-                Only mark the Android Setup Wizard step complete when{' '}
+                <strong>Important:</strong> Only mark the Android Setup Wizard step complete when{' '}
                 <code>CloudRunHealthVerifier.verifyBackend(url)</code> returns{' '}
                 <code>verified == true</code> from a live <code>GET /health</code> HTTP 200
-                response.
+                response. Async article pipelines return HTTP 202 with a <code>pipeline.id</code>{' '}
+                that Android can poll via <code>GET /api/v1/content/pipelines/:pipelineId</code>.
               </p>
             </div>
           </section>

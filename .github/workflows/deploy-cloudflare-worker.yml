@@ -1,0 +1,59 @@
+name: Deploy AUTOBLOGGER AI Cloudflare Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy-cloudflare-worker.yml'
+  workflow_dispatch:
+
+jobs:
+  validate-and-deploy:
+    name: Typecheck, Test, Migrate D1 & Deploy Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Run unit & contract tests
+        run: npm test
+
+      - name: Verify Wrangler bundle dry-run
+        run: npx wrangler deploy --dry-run
+
+      - name: Apply D1 remote migrations
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: backend
+          command: d1 migrations apply DB --remote
+
+      - name: Deploy Worker to Cloudflare
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: backend
+          command: deploy

@@ -1,62 +1,61 @@
-import { Router } from 'express';
+import { Hono } from 'hono';
 import { z } from 'zod';
-import { requireAuth } from '../middleware/auth.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { AppVariables, requireAuth } from '../middleware/auth.js';
 import {
+  listNotifications,
   registerDeviceToken,
   sendNotification,
   unregisterDeviceToken,
 } from '../services/fcmService.js';
+import { WorkerEnv } from '../types/index.js';
 
-const router = Router();
-router.use(requireAuth);
+const notificationRoutes = new Hono<{ Bindings: WorkerEnv; Variables: AppVariables }>();
+notificationRoutes.use('*', requireAuth);
 
-router.post(
-  '/tokens/register',
-  asyncHandler(async (req, res) => {
-    const body = z
-      .object({
-        token: z.string().min(10),
-        deviceName: z.string().max(120).optional(),
-        platform: z.string().max(40).optional(),
-      })
-      .parse(req.body);
+notificationRoutes.get('/', async (c) => {
+  const limitParam = c.req.query('limit');
+  const limit = limitParam ? Number(limitParam) : 30;
+  const notifications = await listNotifications(c.env, limit);
+  return c.json({ notifications });
+});
 
-    await registerDeviceToken({
-      token: body.token,
-      uid: req.principal?.uid || 'unknown',
-      deviceName: body.deviceName,
-      platform: body.platform,
-    });
+notificationRoutes.post('/tokens/register', async (c) => {
+  const body = z
+    .object({
+      token: z.string().min(10),
+      deviceName: z.string().max(120).optional(),
+      platform: z.string().max(40).optional(),
+    })
+    .parse(await c.req.json());
 
-    res.status(201).json({ registered: true });
-  })
-);
+  await registerDeviceToken(c.env, {
+    token: body.token,
+    uid: c.get('principal')?.uid || 'unknown',
+    deviceName: body.deviceName,
+    platform: body.platform,
+  });
 
-router.post(
-  '/tokens/unregister',
-  asyncHandler(async (req, res) => {
-    const body = z.object({ token: z.string().min(10) }).parse(req.body);
-    await unregisterDeviceToken(body.token);
-    res.json({ unregistered: true });
-  })
-);
+  return c.json({ registered: true }, 201);
+});
 
-router.post(
-  '/send',
-  asyncHandler(async (req, res) => {
-    const body = z
-      .object({
-        title: z.string().min(1).max(160),
-        body: z.string().min(1).max(1000),
-        topic: z.string().max(120).optional(),
-        data: z.record(z.string()).optional(),
-      })
-      .parse(req.body);
+notificationRoutes.post('/tokens/unregister', async (c) => {
+  const body = z.object({ token: z.string().min(10) }).parse(await c.req.json());
+  await unregisterDeviceToken(c.env, body.token);
+  return c.json({ unregistered: true });
+});
 
-    const result = await sendNotification(body);
-    res.json(result);
-  })
-);
+notificationRoutes.post('/send', async (c) => {
+  const body = z
+    .object({
+      title: z.string().min(1).max(160),
+      body: z.string().min(1).max(1000),
+      topic: z.string().max(120).optional(),
+      data: z.record(z.string()).optional(),
+    })
+    .parse(await c.req.json());
 
-export default router;
+  const result = await sendNotification(c.env, body);
+  return c.json(result);
+});
+
+export default notificationRoutes;

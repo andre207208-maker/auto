@@ -1,20 +1,4 @@
-import { env } from '../config/env.js';
-
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-
-const LEVEL_PRIORITY: Record<LogLevel, number> = {
-  debug: 10,
-  info: 20,
-  warn: 30,
-  error: 40,
-};
-
-const CLOUD_SEVERITY: Record<LogLevel, string> = {
-  debug: 'DEBUG',
-  info: 'INFO',
-  warn: 'WARNING',
-  error: 'ERROR',
-};
 
 const SENSITIVE_KEYS = new Set([
   'authorization',
@@ -52,18 +36,10 @@ export function redactSensitive(value: unknown, depth = 0): unknown {
   return value;
 }
 
-function shouldLog(level: LogLevel): boolean {
-  return LEVEL_PRIORITY[level] >= LEVEL_PRIORITY[env.LOG_LEVEL];
-}
-
 function emit(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
-  if (!shouldLog(level)) {
-    return;
-  }
-
   const entry = {
-    severity: CLOUD_SEVERITY[level],
-    service: env.SERVICE_NAME,
+    level,
+    service: 'autoblogger-ai-backend',
     timestamp: new Date().toISOString(),
     message,
     ...(meta ? { context: redactSensitive(meta) } : {}),

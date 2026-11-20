@@ -1,5 +1,5 @@
-import { AIProviderName, SEOAuditResult } from '../types/index.js';
-import { aiProviderManager } from './aiProviderManager.js';
+import { AIProviderName, SEOAuditResult, WorkerEnv } from '../types/index.js';
+import { generateWithFailover } from './aiProviderManager.js';
 
 function stripTags(html: string): string {
   return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -138,12 +138,15 @@ export function auditSeo(params: {
   };
 }
 
-export async function optimizeMetadataWithAI(params: {
-  title: string;
-  excerpt: string;
-  primaryKeyword: string;
-  preferredProvider?: AIProviderName;
-}): Promise<{ metaTitle: string; metaDescription: string; slug: string; labels: string[] }> {
+export async function optimizeMetadataWithAI(
+  env: WorkerEnv,
+  params: {
+    title: string;
+    excerpt: string;
+    primaryKeyword: string;
+    preferredProvider?: AIProviderName;
+  }
+): Promise<{ metaTitle: string; metaDescription: string; slug: string; labels: string[] }> {
   const prompt = `
 Optimize SEO metadata for this article:
 Current Title: ${params.title}
@@ -159,7 +162,7 @@ Return strict JSON:
 }
 `;
 
-  const response = await aiProviderManager.generateWithFailover({
+  const response = await generateWithFailover(env, {
     prompt,
     systemInstruction: 'Return valid JSON only for technical SEO optimization.',
     preferredProvider: params.preferredProvider,
